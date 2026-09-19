@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Mic DSP
+Comment=Control the mic filter-chain (gate, noise suppression, de-esser, compressor, autogain, limiter)
+Exec=/home/chardlinux/Development/random/mic-dsp-ui/run.sh
+Icon=audio-input-microphone
+Terminal=false
+Categories=AudioVideo;Audio;
