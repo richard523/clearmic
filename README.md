@@ -1,8 +1,9 @@
 # mic-dsp-ui
 
-GTK4/libadwaita control panel for the native PipeWire mic filter-chain.
-Replaces hand-editing `~/.config/pipewire/pipewire.conf.d/…` and restarting
-services by hand.
+GTK4/libadwaita control panel for the native PipeWire mic filter-chain,
+following the GNOME HIG (ToolbarView + headerbar, ViewSwitcher tabs,
+PreferencesGroup rows, ComboRow, ToastOverlay). Replaces hand-editing
+`~/.config/pipewire/pipewire.conf.d/…` and restarting services by hand.
 
 ## Chain
 

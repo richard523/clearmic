@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Mic DSP — GTK4/libadwaita UI for the PipeWire mic filter-chain."""
+"""Mic DSP — GTK4/libadwaita UI for the PipeWire mic filter-chain.
+
+Follows the GNOME HIG: Adw.ToolbarView + headerbar, ViewSwitcher tabs for
+the stages, PreferencesGroup/ActionRow lists, ComboRow, ToastOverlay, and
+Adw.Banner only for persistent actionable states.
+"""
 import json
 import math
 import os
@@ -11,7 +16,7 @@ import time
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gdk, Gio, GLib, Gtk
+from gi.repository import Adw, Gio, GLib, Gtk
 
 import backend
 import confgen
@@ -22,11 +27,6 @@ APP_ID = "org.chardlinux.MicDSP"
 STATE_DIR = os.path.expanduser("~/.config/mic-dsp-ui")
 STATE_PATH = os.path.join(STATE_DIR, "state.json")
 PRESETS_DIR = os.path.join(STATE_DIR, "presets")
-
-CSS = b"""
-.meter-label { font-size: 9pt; opacity: 0.6; }
-.stage-switchbox { padding: 4px 0 6px 0; }
-"""
 
 
 # ---------------------------------------------------------------- state I/O
@@ -53,59 +53,55 @@ def load_state():
     return st, False, True
 
 
-# ---------------------------------------------------------------- meter view
+# ---------------------------------------------------------------- level bar
 
-def _rounded(cr, x, y, w, h, r):
-    cr.new_sub_path()
-    cr.arc(x + w - r, y + r, r, -math.pi / 2, 0)
-    cr.arc(x + w - r, y + h - r, r, 0, math.pi / 2)
-    cr.arc(x + r, y + h - r, r, math.pi / 2, math.pi)
-    cr.arc(x + r, y + r, r, math.pi, 3 * math.pi / 2)
-    cr.close_path()
+class LevelBar(Gtk.DrawingArea):
+    """Peak meter with dB scale, peak-hold and theme-colored track."""
 
-
-def _level_color(n):
-    if n < 0.6:
-        t = n / 0.6
-        return (0.30 + 0.65 * t, 0.85, 0.45 - 0.15 * t)
-    t = (n - 0.6) / 0.4
-    return (0.95, 0.85 - 0.55 * t, 0.30)
-
-
-class MeterView(Gtk.Box):
-    def __init__(self, label):
-        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+    def __init__(self):
+        super().__init__()
+        self.set_size_request(340, 40)
+        self.set_content_height(40)
+        self.meter = None
         self.peak_db = -99.0
         self.peak_ts = 0.0
-        self.meter = None
-        self.label_widget = Gtk.Label(label=label, xalign=0.0,
-                                      css_classes=["meter-label"])
-        self.area = Gtk.DrawingArea()
-        self.area.set_content_height(44)
-        self.area.set_draw_func(self._draw, None, None)
-        self.append(self.label_widget)
-        self.append(self.area)
+        self.set_draw_func(self._draw)
 
-    def attach(self, meter):
-        self.meter = meter
+    @staticmethod
+    def _level_color(n):
+        if n < 0.6:
+            t = n / 0.6
+            return (0.30 + 0.65 * t, 0.85, 0.45 - 0.15 * t)
+        t = (n - 0.6) / 0.4
+        return (0.95, 0.85 - 0.55 * t, 0.30)
 
-    def _draw(self, area, cr, w, h, *args):
+    @staticmethod
+    def _rounded(cr, x, y, w, h, r):
+        cr.new_sub_path()
+        cr.arc(x + w - r, y + r, r, -math.pi / 2, 0)
+        cr.arc(x + w - r, y + h - r, r, 0, math.pi / 2)
+        cr.arc(x + r, y + h - r, r, math.pi / 2, math.pi)
+        cr.arc(x + r, y + r, r, math.pi, 3 * math.pi / 2)
+        cr.close_path()
+
+    def _draw(self, area, cr, w, h):
         db = self.meter.get_dbfs() if self.meter else -99.0
         now = time.monotonic()
         if db > self.peak_db:
             self.peak_db, self.peak_ts = db, now
         elif now - self.peak_ts > 1.5:
             self.peak_db, self.peak_ts = db, now
-        # track
-        cr.set_source_rgba(0.10, 0.11, 0.13, 1.0)
-        _rounded(cr, 0, 0, w, h, 8)
+        # track in theme foreground color
+        fg = area.get_color()
+        cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.12)
+        self._rounded(cr, 0, 0, w, h, 8)
         cr.fill()
         # fill
         n = max(0.0, min(1.0, (db + 60.0) / 60.0))
         if n > 0.003:
-            r, g, b = _level_color(n)
+            r, g, b = self._level_color(n)
             cr.set_source_rgba(r, g, b, 0.95)
-            _rounded(cr, 0, 0, w * n, h, 8)
+            self._rounded(cr, 0, 0, w * n, h, 8)
             cr.fill()
         # peak hold
         pn = max(0.0, min(1.0, (self.peak_db + 60.0) / 60.0))
@@ -114,7 +110,7 @@ class MeterView(Gtk.Box):
             cr.rectangle(w * pn - 1.5, 1, 2.0, h - 2)
             cr.fill()
         # ticks
-        cr.set_source_rgba(1, 1, 1, 0.22)
+        cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.25)
         for t in (-50, -40, -30, -20, -10):
             x = (t + 60.0) / 60.0 * w
             cr.move_to(x, 0)
@@ -132,20 +128,18 @@ class Window(Adw.ApplicationWindow):
     def __init__(self, app, test_mode=False):
         super().__init__(application=app)
         self.test_mode = test_mode
-        self.set_default_size(880, 660)
+        self.set_default_size(900, 700)
         self.set_title("Mic DSP")
         self.state, self.migrated, self.fresh = load_state()
         confgen.write(self.state)  # conf exists even if the UI fails to build
-        self.selected = None
         self.pending = {}
         self.pending_src = None
         self.meters = {}
         self._meter_tick = None
         self.monitor = backend.Monitor()
-        self.stage_buttons = {}
-        self.stage_switches = {}
+        self.enabled_switches = {}
+        self.param_rows = {}      # (stage, port) -> record
         self.restarting = False
-        self.param_rows = {}
         self._preset_map = {}
         self._dev_names = []
 
@@ -155,24 +149,14 @@ class Window(Adw.ApplicationWindow):
     # ------------------------------------------------------------ UI build
 
     def _build_ui(self):
-        css = Gtk.CssProvider()
-        css.load_from_data(CSS)
-        Gtk.StyleContext.add_provider_for_display(
-            Gdk.Display.get_default(), css,
-            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        self.toast_overlay = Adw.ToastOverlay()
+        self.set_content(self.toast_overlay)
 
-        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        self.set_content(outer)
+        toolbar = Adw.ToolbarView()
+        self.toast_overlay.set_child(toolbar)
 
-        # banner
-        self.banner = Adw.Banner()
-        self.banner.connect("button-clicked", self._on_banner_button)
-        outer.append(self.banner)
-
-        # header
         header = Adw.HeaderBar()
-        outer.append(header)
-
+        toolbar.add_top_bar(header)
         self.wtitle = Adw.WindowTitle(title="Mic DSP", subtitle="…")
         header.set_title_widget(self.wtitle)
 
@@ -183,77 +167,114 @@ class Window(Adw.ApplicationWindow):
         header.pack_start(self.preset_btn)
 
         # listen
-        self.listen_btn = Gtk.ToggleButton(icon_name="audio-headphones-symbolic")
-        self.listen_btn.set_tooltip_text(
-            "Listen: route processed mic to the default output")
+        self.listen_btn = Gtk.ToggleButton(
+            icon_name="audio-headphones-symbolic",
+            tooltip_text="Listen: route processed mic to the default output")
         self.listen_btn.connect("toggled", self._on_listen)
         header.pack_end(self.listen_btn)
 
-        # meters card
-        mcard = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6,
-                        margin_top=10, margin_bottom=4,
-                        margin_start=14, margin_end=14)
-        outer.append(mcard)
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10,
+                       margin_top=10, margin_bottom=10,
+                       margin_start=12, margin_end=12)
+        toolbar.set_content(body)
 
-        dev_row = Gtk.Box(spacing=10)
-        mcard.append(dev_row)
-        dev_row.append(Gtk.Label(label="Input device",
-                                 css_classes=["heading"]))
-        self.dev_combo = Gtk.DropDown()
+        # --- signal group (device + meters)
+        sig_group = Adw.PreferencesGroup(title="Signal")
+        self.dev_combo = Adw.ComboRow(title="Input device",
+                                      subtitle="capture target of the chain")
         self.dev_combo.connect("notify::selected", self._on_device_selected)
-        dev_row.append(self.dev_combo)
+        sig_group.add(self.dev_combo)
 
-        self.meter_raw = MeterView("Raw (input device)")
-        self.meter_out = MeterView("Processed (virtual source)")
-        mcard.append(self.meter_raw)
-        mcard.append(self.meter_out)
+        raw_row = Adw.ActionRow(title="Raw", subtitle="input device level")
+        self.raw_bar = LevelBar()
+        raw_row.add_suffix(self.raw_bar)
+        sig_group.add(raw_row)
 
-        # stage strip
-        strip_label = Gtk.Label(label="Chain", xalign=0.0, margin_start=14,
-                                css_classes=["heading"])
-        outer.append(strip_label)
-        strip = Gtk.Box(spacing=8, margin_start=14, margin_end=14,
-                        margin_top=2, margin_bottom=2, homogeneous=True)
-        outer.append(strip)
+        out_row = Adw.ActionRow(title="Processed",
+                                subtitle="virtual source level")
+        self.out_bar = LevelBar()
+        out_row.add_suffix(self.out_bar)
+        sig_group.add(out_row)
+        body.append(sig_group)
+
+        # --- stage tabs
+        switcher = Adw.ViewSwitcher()
+        switcher.set_policy(Adw.ViewSwitcherPolicy.WIDE)
+        body.append(switcher)
+
+        self.stack = Adw.ViewStack()
+        switcher.set_stack(self.stack)
         for s in STAGES:
-            strip.append(self._build_stage_card(s))
+            page = self._build_stage_page(s)
+            self.stack.add_titled(page, s, STAGE_INFO[s]["title"])
+        body.append(self.stack)
 
-        # params panel
-        self.params_scroll = Gtk.ScrolledWindow(vexpand=True,
-                                                margin_start=14,
-                                                margin_end=14,
-                                                margin_top=6,
-                                                margin_bottom=10)
-        self.params_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        self.params_scroll.set_child(self.params_box)
-        outer.append(self.params_scroll)
+        # banner (persistent actionable states only)
+        self.banner = Adw.Banner()
+        self.banner.connect("button-clicked", self._on_banner_button)
+        toolbar.add_top_bar(self.banner)
 
-    def _build_stage_card(self, stage):
+    def _build_stage_page(self, stage):
         info = STAGE_INFO[stage]
-        frame = Gtk.Frame()
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        frame.set_child(box)
-        btn = Gtk.ToggleButton()
-        btn.set_child(Gtk.Label(label=info["title"],
-                                css_classes=["heading"]))
-        btn.set_tooltip_text(info["subtitle"])
-        btn.connect("toggled", self._on_stage_selected, stage)
-        box.append(btn)
-        swbox = Gtk.Box(css_classes=["stage-switchbox"])
-        sw = Gtk.Switch(halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER)
+        group = Adw.PreferencesGroup(title=info["title"],
+                                     description=info["subtitle"])
+
+        erow = Adw.ActionRow(
+            title="Enabled",
+            subtitle="rebuilding the chain restarts PipeWire (~3 s)")
+        sw = Gtk.Switch(valign=Gtk.Align.CENTER)
         sw.connect("notify::active", self._on_stage_enable, stage)
-        swbox.append(sw)
-        box.append(swbox)
-        self.stage_buttons[stage] = btn
-        self.stage_switches[stage] = sw
-        return frame
+        self.enabled_switches[stage] = sw
+        erow.add_suffix(sw)
+        group.add(erow)
+
+        for p in info["params"]:
+            group.add(self._build_param_row(stage, p))
+        return group
+
+    def _build_param_row(self, stage, p):
+        stored = self.state["stages"][stage]["params"].get(p["port"],
+                                                          p["default"])
+        if p["toggle"]:
+            row = Adw.ActionRow(title=p["disp"])
+            sw = Gtk.Switch(valign=Gtk.Align.CENTER)
+            sw.set_active(float(stored) >= 0.5)
+            sw.connect("notify::active", self._on_toggle_changed, stage, p)
+            row.add_suffix(sw)
+            self.param_rows[(stage, p["port"])] = {"switch": sw,
+                                                   "param": p}
+            return row
+
+        row = Adw.ActionRow(title=p["disp"])
+        mn, mx = ui_bounds(p)
+        val = to_ui(p, stored)
+        step = p["step"] or (mx - mn) / 100.0
+        adj = Gtk.Adjustment(value=val, lower=mn, upper=mx,
+                             step_increment=step, page_increment=step * 10)
+        scale = Gtk.Scale(adjustment=adj, draw_value=False,
+                          hexpand=True, valign=Gtk.Align.CENTER)
+        scale.set_size_request(320, -1)
+        digits = 0 if p["integer"] else (2 if step < 0.5 else 1)
+        scale.set_digits(digits)
+        vlabel = Gtk.Label(width_chars=10, xalign=1.0,
+                           css_classes=["numeric"])
+        vlabel.set_text(self._fmt_value(p, val))
+        scale.connect("value-changed", self._on_param_changed, stage, p)
+        box = Gtk.Box(spacing=8)
+        box.append(scale)
+        box.append(vlabel)
+        row.add_suffix(box)
+        self.param_rows[(stage, p["port"])] = {"scale": scale,
+                                              "adj": adj,
+                                              "vlabel": vlabel,
+                                              "param": p}
+        return row
 
     # ------------------------------------------------------------ startup
 
     def _startup(self):
         self._refresh_devices()
-        self._refresh_stage_cards()
-        self._select_stage("rnnoise")
+        self._refresh_all_rows()
         confgen.write(self.state)
         if self.migrated:
             self._set_banner(
@@ -276,12 +297,14 @@ class Window(Adw.ApplicationWindow):
         self.get_application().quit()
         return False
 
+    # ------------------------------------------------------------ meters
+
     def _start_meters(self):
         self._stop_meters()
         self.meters["raw"] = backend.Meter(self.state["input"])
         self.meters["out"] = backend.Meter(backend.FILTER_OUTPUT)
-        self.meter_raw.attach(self.meters["raw"])
-        self.meter_out.attach(self.meters["out"])
+        self.raw_bar.meter = self.meters["raw"]
+        self.out_bar.meter = self.meters["out"]
         for m in self.meters.values():
             m.start()
         self._meter_tick = GLib.timeout_add(33, self._on_meter_tick)
@@ -295,31 +318,11 @@ class Window(Adw.ApplicationWindow):
         self.meters = {}
 
     def _on_meter_tick(self):
-        self.meter_raw.area.queue_draw()
-        self.meter_out.area.queue_draw()
+        self.raw_bar.queue_draw()
+        self.out_bar.queue_draw()
         return GLib.SOURCE_CONTINUE
 
-    def _sync_from_live(self):
-        """Adopt live values from the running chain into state + UI."""
-        live = backend.get_controls()
-        if not live:
-            return
-        for stage in STAGES:
-            if not self.state["stages"][stage]["enabled"]:
-                continue
-            for p in STAGE_INFO[stage]["params"]:
-                key = f"{stage}:{p['port']}"
-                if key in live:
-                    val = live[key]
-                    if isinstance(val, bool):
-                        val = 1.0 if val else 0.0
-                    self.state["stages"][stage]["params"][p["port"]] = \
-                        float(val)
-        save_state(self.state)
-        confgen.write(self.state)
-        self._refresh_param_panel()
-        nid = backend.filter_node_id()
-        self._set_status(f"live · node {nid}")
+    # ------------------------------------------------------------ refresh
 
     def _refresh_devices(self):
         devs = backend.input_devices()
@@ -339,84 +342,61 @@ class Window(Adw.ApplicationWindow):
                 self.state["input"] = self._dev_names[sel]
         self.dev_combo.handler_unblock_by_func(self._on_device_selected)
 
-    def _refresh_stage_cards(self):
-        for s in STAGES:
-            st = self.state["stages"][s]
-            sw = self.stage_switches[s]
+    def _refresh_all_rows(self):
+        """Push state values into every widget (without emitting changes)."""
+        for stage in STAGES:
+            sw = self.enabled_switches[stage]
             sw.handler_block_by_func(self._on_stage_enable)
-            sw.set_active(st["enabled"])
+            sw.set_active(self.state["stages"][stage]["enabled"])
             sw.handler_unblock_by_func(self._on_stage_enable)
-            btn = self.stage_buttons[s]
-            btn.set_css_classes([] if st["enabled"] else ["flat"])
+            self._set_page_sensitive(stage,
+                                     self.state["stages"][stage]["enabled"])
+        for (stage, port), rec in self.param_rows.items():
+            stored = self.state["stages"][stage]["params"].get(port,
+                                                               rec["param"]["default"])
+            if "switch" in rec:
+                s = rec["switch"]
+                s.handler_block_by_func(self._on_toggle_changed)
+                s.set_active(float(stored) >= 0.5)
+                s.handler_unblock_by_func(self._on_toggle_changed)
+            else:
+                p = rec["param"]
+                scale = rec["scale"]
+                scale.handler_block_by_func(self._on_param_changed)
+                rec["adj"].set_value(to_ui(p, stored))
+                rec["vlabel"].set_text(self._fmt_value(p, to_ui(p, stored)))
+                scale.handler_unblock_by_func(self._on_param_changed)
 
-    # ------------------------------------------------------------ params UI
+    def _set_page_sensitive(self, stage, enabled):
+        for (s, _port), rec in self.param_rows.items():
+            if s != stage:
+                continue
+            w = rec.get("switch") or rec.get("scale")
+            w.set_sensitive(enabled)
 
-    def _select_stage(self, stage):
-        self.selected = stage
-        for s, b in self.stage_buttons.items():
-            b.handler_block_by_func(self._on_stage_selected)
-            b.set_active(s == stage)
-            b.handler_unblock_by_func(self._on_stage_selected)
-        self._refresh_param_panel()
-
-    def _on_stage_selected(self, btn, stage):
-        if btn.get_active():
-            self._select_stage(stage)
-
-    def _refresh_param_panel(self):
-        for w in list(self.param_rows.values()):
-            self.params_box.remove(w)
-        self.param_rows = {}
-        stage = self.selected
-        if stage is None:
+    def _sync_from_live(self):
+        """Adopt live values from the running chain into state + UI."""
+        live = backend.get_controls()
+        if not live:
             return
-        info = STAGE_INFO[stage]
-        if not self.state["stages"][stage]["enabled"]:
-            note = Gtk.Label(
-                label=f"({info['title']} is disabled — "
-                      f"changes apply once enabled)",
-                css_classes=["dim-label"])
-            note.set_halign(Gtk.Align.START)
-            self.params_box.append(note)
-        for p in info["params"]:
-            row = self._build_param_row(stage, p)
-            self.params_box.append(row)
-            self.param_rows[p["port"]] = row
+        for stage in STAGES:
+            if not self.state["stages"][stage]["enabled"]:
+                continue
+            for p in STAGE_INFO[stage]["params"]:
+                key = f"{stage}:{p['port']}"
+                if key in live:
+                    val = live[key]
+                    if isinstance(val, bool):
+                        val = 1.0 if val else 0.0
+                    self.state["stages"][stage]["params"][p["port"]] = \
+                        float(val)
+        save_state(self.state)
+        confgen.write(self.state)
+        self._refresh_all_rows()
+        nid = backend.filter_node_id()
+        self._set_status(f"live · node {nid}")
 
-    def _build_param_row(self, stage, p):
-        if p["toggle"]:
-            return self._build_toggle_row(stage, p)
-        row = Gtk.Box(spacing=12, margin_top=4, margin_bottom=4)
-        row.append(Gtk.Label(label=p["disp"], xalign=0.0,
-                            width_chars=22, hexpand=False))
-        mn, mx = ui_bounds(p)
-        stored = self.state["stages"][stage]["params"].get(p["port"],
-                                                           p["default"])
-        val = to_ui(p, stored)
-        step = p["step"] or (mx - mn) / 100.0
-        adj = Gtk.Adjustment(value=val, lower=mn, upper=mx,
-                             step_increment=step, page_increment=step * 10)
-        scale = Gtk.Scale(adjustment=adj, hexpand=True, draw_value=False)
-        digits = 0 if p["integer"] else (2 if step < 0.5 else 1)
-        scale.set_digits(digits)
-        vlabel = Gtk.Label(width_chars=10, xalign=1.0, css_classes=["numeric"])
-        vlabel.set_text(self._fmt_value(p, val))
-        scale.connect("value-changed",
-                      self._on_param_changed, stage, p, vlabel)
-        row.append(scale)
-        row.append(vlabel)
-        return row
-
-    def _build_toggle_row(self, stage, p):
-        row = Gtk.Box(spacing=12, margin_top=4, margin_bottom=4)
-        row.append(Gtk.Label(label=p["disp"], xalign=0.0, hexpand=True))
-        sw = Gtk.Switch()
-        stored = self.state["stages"][stage]["params"].get(p["port"],
-                                                          p["default"])
-        sw.set_active(float(stored) >= 0.5)
-        sw.connect("notify::active", self._on_toggle_changed, stage, p)
-        row.append(sw)
-        return row
+    # ------------------------------------------------------------ param edits
 
     @staticmethod
     def _fmt_value(p, ui_val):
@@ -429,17 +409,16 @@ class Window(Adw.ApplicationWindow):
             txt += f" {p['unit']}"
         return txt
 
-    def _on_param_changed(self, scale, stage, p, vlabel):
-        ui_val = scale.get_value()
-        vlabel.set_text(self._fmt_value(p, ui_val))
-        stored = from_ui(p, ui_val)
-        self.pending[f"{stage}:{p['port']}"] = stored
-        if self.pending_src:
-            GLib.Source.remove(self.pending_src)
-        self.pending_src = GLib.timeout_add(300, self._flush_pending)
+    def _on_param_changed(self, scale, stage, p):
+        rec = self.param_rows[(stage, p["port"])]
+        ui_val = rec["adj"].get_value()
+        rec["vlabel"].set_text(self._fmt_value(p, ui_val))
+        self._queue_edit(stage, p, from_ui(p, ui_val))
 
     def _on_toggle_changed(self, sw, _pspec, stage, p):
-        stored = 1.0 if sw.get_active() else 0.0
+        self._queue_edit(stage, p, 1.0 if sw.get_active() else 0.0)
+
+    def _queue_edit(self, stage, p, stored):
         self.pending[f"{stage}:{p['port']}"] = stored
         if self.pending_src:
             GLib.Source.remove(self.pending_src)
@@ -465,7 +444,7 @@ class Window(Adw.ApplicationWindow):
             try:
                 backend.set_controls(applicable, toggles)
             except RuntimeError as e:
-                self._set_status(f"error: {e}")
+                self.toast(f"Could not apply: {e}")
         save_state(self.state)
         confgen.write(self.state)
         return False
@@ -480,24 +459,26 @@ class Window(Adw.ApplicationWindow):
             self.state["stages"][stage]["enabled"] = True
             if stage in EXCLUSIVE:
                 other = "deepfilter" if stage == "rnnoise" else "rnnoise"
-                self.state["stages"][other]["enabled"] = False
+                if self.state["stages"][other]["enabled"]:
+                    self.state["stages"][other]["enabled"] = False
+                    self.toast(f"Disabled {STAGE_INFO[other]['title']} "
+                                f"(only one noise suppressor)")
         else:
             if not any(s["enabled"] for s in self.state["stages"].values()):
-                # keep at least one stage in the chain
                 sw.handler_block_by_func(self._on_stage_enable)
                 sw.set_active(True)
                 sw.handler_unblock_by_func(self._on_stage_enable)
+                self.toast("At least one stage must stay enabled")
                 return
             self.state["stages"][stage]["enabled"] = False
         save_state(self.state)
         confgen.write(self.state)
-        self._refresh_stage_cards()
-        self._refresh_param_panel()
+        self._refresh_all_rows()
         self._apply_structural()
 
     def _apply_structural(self):
         self.restarting = True
-        self._set_banner("Restarting PipeWire to rebuild the chain…")
+        self.toast("Restarting PipeWire to rebuild the chain…")
         self._set_status("restarting…")
         self._stop_meters()
         self._stop_listen()
@@ -515,12 +496,13 @@ class Window(Adw.ApplicationWindow):
             self._sync_from_live()
             if not self.test_mode:
                 self._start_meters()
+            self.toast("Chain is live")
         else:
             self._set_banner("PipeWire restart failed — check journalctl.",
                              "Retry")
             self._set_status("error")
 
-    # ------------------------------------------------------------ banner/status
+    # ------------------------------------------------------------ banner/toast
 
     def _set_banner(self, text, button=None):
         if text is None:
@@ -533,19 +515,22 @@ class Window(Adw.ApplicationWindow):
     def _on_banner_button(self, *_):
         self._apply_structural()
 
+    def toast(self, msg):
+        self.toast_overlay.add_toast(Adw.Toast(title=msg))
+
     def _set_status(self, text):
         self.wtitle.set_subtitle(text)
 
     # ------------------------------------------------------------ devices
 
     def _on_device_selected(self, *_):
-        if not self._dev_names:
+        if not self._dev_names or self.restarting:
             return
         idx = self.dev_combo.get_selected()
         if idx >= len(self._dev_names):
             return
         name = self._dev_names[idx]
-        if name == self.state.get("input") or self.restarting:
+        if name == self.state.get("input"):
             return
         self.state["input"] = name
         save_state(self.state)
@@ -597,7 +582,7 @@ class Window(Adw.ApplicationWindow):
             for fn in files:
                 name = fn[:-5]
                 action = "preset-" + re.sub(r"[^a-z0-9-]", "-",
-                                             name.lower())
+                                            name.lower())
                 self._preset_map[action] = fn
                 section.append(name, f"win.{action}")
         else:
@@ -607,7 +592,7 @@ class Window(Adw.ApplicationWindow):
 
     def _on_preset_save_as(self, *_):
         dlg = Adw.MessageDialog(transient_for=self,
-                               heading="Save preset as…")
+                                heading="Save preset as…")
         entry = Gtk.Entry(placeholder_text="e.g. stream-clean")
         dlg.set_extra_child(entry)
         dlg.add_response("cancel", "Cancel")
@@ -623,6 +608,7 @@ class Window(Adw.ApplicationWindow):
                           "w") as f:
                     json.dump(self.state, f, indent=2)
                 self._reload_preset_menu()
+                self.toast(f"Preset “{name}” saved")
 
         dlg.connect("response", on_resp)
         dlg.present()
@@ -636,9 +622,7 @@ class Window(Adw.ApplicationWindow):
         save_state(self.state)
         confgen.write(self.state)
         self._refresh_devices()
-        self._refresh_stage_cards()
-        self._select_stage(next(s for s in STAGES
-                                if self.state["stages"][s]["enabled"]))
+        self._refresh_all_rows()
         self._apply_structural()
 
     # ------------------------------------------------------------ shutdown
