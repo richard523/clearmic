@@ -640,7 +640,7 @@ class Window(Adw.ApplicationWindow):
     def _on_about(self, *_):
         dlg = Adw.AboutDialog(
             application_name=APP_TITLE,
-            application_icon="audio-input-microphone",
+            application_icon="io.github.richard523.ClearMic",
             version="1.0.0",
             comments="Control panel for the PipeWire microphone filter "
                      "chain: noise suppression, de-essing, compression "

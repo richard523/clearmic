@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="128" height="128" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg">
+  <title>ClearMic</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3584e4"/>
+      <stop offset="1" stop-color="#1a5fb4"/>
+    </linearGradient>
+  </defs>
+
+  <!-- rounded-square background -->
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#bg)"/>
+
+  <!-- microphone -->
+  <g stroke="#ffffff" stroke-width="7" stroke-linecap="round" fill="none">
+    <path d="M46 52 a18 18 0 0 0 36 0"/>
+    <path d="M64 74 v14"/>
+    <path d="M52 94 h24"/>
+  </g>
+  <rect x="55" y="26" width="18" height="38" rx="9" fill="#ffffff"/>
+
+  <!-- sparkle: the "clean" in ClearMic -->
+  <path d="M94 14 l3.5 8.5 8.5 3.5 -8.5 3.5 -3.5 8.5 -3.5 -8.5 -8.5 -3.5 8.5 -3.5 z"
+        fill="#ffffff"/>
+</svg>

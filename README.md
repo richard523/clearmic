@@ -51,7 +51,7 @@ Any app that records from the virtual source gets the processed signal.
 ```sh
 git clone https://github.com/richard523/clearmic
 cd clearmic
-./install.sh          # installs the desktop entry
+./install.sh          # installs the desktop entry and app icon
 ./run.sh              # or launch from your app grid
 ```
 
