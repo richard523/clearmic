@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=ClearMic
+Comment=Noise suppression, de-esser, compressor and autogain for your microphone
+Exec=@BINDIR@/run.sh
+Icon=audio-input-microphone
+Terminal=false
+Categories=AudioVideo;Audio;
+Keywords=microphone;noise;dsp;rnnoise;filter;pipewire;
+StartupWMClass=io.github.richard523.ClearMic

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Mic DSP — GTK4/libadwaita UI for the PipeWire mic filter-chain.
+"""ClearMic — GTK4/libadwaita control panel for the PipeWire mic
+filter-chain.
 
 Follows the GNOME HIG: Adw.ToolbarView + headerbar, ViewSwitcher tabs for
 the stages, PreferencesGroup/ActionRow lists, ComboRow, ToastOverlay, and
@@ -23,11 +24,13 @@ import confgen
 from catalog import (EXCLUSIVE, STAGES, STAGE_INFO, default_state, from_ui,
                      to_ui, ui_bounds)
 
-APP_ID = "org.chardlinux.MicDSP"
-STATE_DIR = os.path.expanduser("~/.config/mic-dsp-ui")
+APP_ID = "io.github.richard523.ClearMic"
+APP_TITLE = "ClearMic"
+STATE_DIR = os.path.expanduser("~/.config/clearmic")
+OLD_STATE_DIR = os.path.expanduser("~/.config/mic-dsp-ui")  # pre-rename name
 STATE_PATH = os.path.join(STATE_DIR, "state.json")
 PRESETS_DIR = os.path.join(STATE_DIR, "presets")
-LOG_PATH = os.path.join(GLib.get_user_cache_dir(), "mic-dsp-ui", "app.log")
+LOG_PATH = os.path.join(GLib.get_user_cache_dir(), "clearmic", "app.log")
 
 
 def log(msg):
@@ -49,8 +52,17 @@ def save_state(state):
         json.dump(state, f, indent=2)
 
 
+def _migrate_state_dir():
+    """One-time: move ~/.config/mic-dsp-ui to ~/.config/clearmic."""
+    if os.path.exists(STATE_DIR) or not os.path.exists(OLD_STATE_DIR):
+        return
+    os.makedirs(os.path.dirname(STATE_DIR), exist_ok=True)
+    os.rename(OLD_STATE_DIR, STATE_DIR)
+
+
 def load_state():
     """Returns (state, migrated, fresh)."""
+    _migrate_state_dir()
     if os.path.exists(STATE_PATH):
         with open(STATE_PATH) as f:
             return json.load(f), False, False
@@ -141,7 +153,7 @@ class Window(Adw.ApplicationWindow):
         super().__init__(application=app)
         self.test_mode = test_mode
         self.set_default_size(900, 700)
-        self.set_title("Mic DSP")
+        self.set_title(APP_TITLE)
         self.state, self.migrated, self.fresh = load_state()
         confgen.write(self.state)  # conf exists even if the UI fails to build
         self.pending = {}
@@ -169,7 +181,16 @@ class Window(Adw.ApplicationWindow):
 
         header = Adw.HeaderBar()
         toolbar.add_top_bar(header)
-        self.wtitle = Adw.WindowTitle(title="Mic DSP", subtitle="…")
+        # primary menu (About)
+        menu = Gio.Menu()
+        menu.append(f"About {APP_TITLE}", "win.about")
+        self.menu_btn = Gtk.MenuButton(icon_name="open-menu-symbolic",
+                                       menu_model=menu,
+                                       valign=Gtk.Align.CENTER)
+        self.menu_btn.set_tooltip_text("Main menu")
+        header.pack_end(self.menu_btn)
+
+        self.wtitle = Adw.WindowTitle(title=APP_TITLE, subtitle="…")
         header.set_title_widget(self.wtitle)
 
         # presets
@@ -606,6 +627,24 @@ class Window(Adw.ApplicationWindow):
         if was_active:
             log("listen: live test stopped")
 
+    # ------------------------------------------------------------ about
+
+    def _on_about(self, *_):
+        dlg = Adw.AboutDialog(
+            application_name=APP_TITLE,
+            application_icon="audio-input-microphone",
+            version="1.0.0",
+            comments="Control panel for the PipeWire microphone filter "
+                     "chain: noise suppression, de-essing, compression "
+                     "and automatic gain — tuned live, no dropouts.",
+            website="https://github.com/richard523/clearmic",
+            issue_url="https://github.com/richard523/clearmic/issues",
+            developer_name="richard523",
+            developers=["richard523"],
+            license_type=Gtk.License.GPL_3_0,
+        )
+        dlg.present(self)
+
     # ------------------------------------------------------------ presets
 
     def _preset_files(self):
@@ -694,6 +733,9 @@ class App(Adw.Application):
         a_none = Gio.SimpleAction.new("preset-none", None)
         a_none.connect("activate", lambda *_: None)
         self.win.add_action(a_none)
+        a_about = Gio.SimpleAction.new("about", None)
+        a_about.connect("activate", self.win._on_about)
+        self.win.add_action(a_about)
         for action, fn in self.win._preset_map.items():
             a = Gio.SimpleAction.new(action, None)
             a.connect("activate",

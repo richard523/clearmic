@@ -182,7 +182,7 @@ def default_state():
     return {
         "version": 1,
         "input": "",
-        "source_desc": "Mic DSP",
+        "source_desc": "ClearMic",
         "stages": {
             s: {
                 "enabled": s in DEFAULT_ENABLED,
