@@ -178,13 +178,6 @@ class Window(Adw.ApplicationWindow):
         self.preset_btn.connect("clicked", self._on_preset_save_as)
         header.pack_start(self.preset_btn)
 
-        # listen
-        self.listen_btn = Gtk.ToggleButton(
-            icon_name="audio-headphones-symbolic",
-            tooltip_text="Listen: route processed mic to the default output")
-        self.listen_btn.connect("toggled", self._on_listen)
-        header.pack_end(self.listen_btn)
-
         body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10,
                        margin_top=10, margin_bottom=10,
                        margin_start=12, margin_end=12)
@@ -208,15 +201,14 @@ class Window(Adw.ApplicationWindow):
         out_row.add_suffix(self.out_bar)
         sig_group.add(out_row)
 
-        # --- sound check
-        self._checking = False
+        # --- live test (Listen)
         self.sc_row = Adw.ActionRow(
-            title="Sound check",
-            subtitle="Record 5 s from the processed mic and play it back")
-        self.soundcheck_btn = Gtk.Button(label="Record",
-                                         valign=Gtk.Align.CENTER)
-        self.soundcheck_btn.connect("clicked", self._on_soundcheck)
-        self.sc_row.add_suffix(self.soundcheck_btn)
+            title="Live test",
+            subtitle="Hear the processed mic on your output in real time")
+        self.listen_btn = Gtk.ToggleButton(label="Listen",
+                                           valign=Gtk.Align.CENTER)
+        self.listen_btn.connect("toggled", self._on_listen)
+        self.sc_row.add_suffix(self.listen_btn)
         sig_group.add(self.sc_row)
         body.append(sig_group)
 
@@ -570,6 +562,10 @@ class Window(Adw.ApplicationWindow):
 
     def _on_listen(self, btn):
         if btn.get_active():
+            if backend.filter_node_id() is None:
+                self.toast("Filter chain is not running")
+                self._stop_listen()
+                return
             dlg = Adw.MessageDialog(
                 transient_for=self, heading="Route mic to speakers?",
                 body="The processed mic will play on your default output. "
@@ -582,8 +578,12 @@ class Window(Adw.ApplicationWindow):
             def on_resp(d, resp):
                 if resp == "ok":
                     self.monitor.start()
+                    log("listen: live test started")
+                    self.listen_btn.set_label("Stop")
+                    self.sc_row.set_subtitle(
+                        "Listening — tap Stop to end")
                 else:
-                    btn.set_active(False)
+                    self._stop_listen()
 
             dlg.connect("response", on_resp)
             dlg.present()
@@ -591,73 +591,16 @@ class Window(Adw.ApplicationWindow):
             self._stop_listen()
 
     def _stop_listen(self):
+        was_active = self.monitor.active
         self.monitor.stop()
         self.listen_btn.handler_block_by_func(self._on_listen)
         self.listen_btn.set_active(False)
         self.listen_btn.handler_unblock_by_func(self._on_listen)
-
-    # ------------------------------------------------------------ sound check
-
-    SC_SECONDS = 5
-
-    def _on_soundcheck(self, *_):
-        if self._checking:
-            return
-        if backend.filter_node_id() is None:
-            self.toast("Filter chain is not running")
-            return
-        self._checking = True
-        self.soundcheck_btn.set_sensitive(False)
-        self.sc_row.set_subtitle(f"Recording {self.SC_SECONDS} s…")
-        threading.Thread(target=self._soundcheck_worker,
-                         daemon=True).start()
-
-    def _soundcheck_worker(self):
-        import subprocess
-        path = os.path.join(GLib.get_user_cache_dir(), "mic-dsp-ui",
-                            "soundcheck.wav")
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        try:
-            os.unlink(path)
-        except FileNotFoundError:
-            pass
-        log(f"soundcheck: recording {self.SC_SECONDS}s -> {path}")
-        rec = subprocess.run(
-            ["pw-record", "--target", backend.FILTER_OUTPUT,
-             "--sample-count", str(self.SC_SECONDS * 48000), path],
-            capture_output=True, timeout=30)
-        size = os.path.getsize(path) if os.path.exists(path) else 0
-        # pw-record exits nonzero after a clean --sample-count finish;
-        # judge success by the file it wrote instead.
-        if size < 2 * 48000 * self.SC_SECONDS:
-            log(f"soundcheck: recording failed "
-                f"(exit={rec.returncode}, size={size})")
-            log(f"soundcheck: pw-record stderr: "
-                f"{rec.stderr.decode(errors='replace')[-500:]}")
-            GLib.idle_add(self._soundcheck_done, False,
-                          "pw-record produced no usable audio")
-            return
-        log(f"soundcheck: recorded {size} bytes, playing back")
-        GLib.idle_add(self._soundcheck_playing)
-        play = subprocess.run(["pw-play", path], capture_output=True,
-                              timeout=30)
-        log(f"soundcheck: playback done (exit={play.returncode})")
-        GLib.idle_add(self._soundcheck_done, True, "")
-
-    def _soundcheck_playing(self):
-        self.sc_row.set_subtitle("Playing back…")
-        return False
-
-    def _soundcheck_done(self, ok, err):
-        self._checking = False
-        self.soundcheck_btn.set_sensitive(True)
+        self.listen_btn.set_label("Listen")
         self.sc_row.set_subtitle(
-            "Record 5 s from the processed mic and play it back")
-        if ok:
-            self.toast("Sound check finished")
-        else:
-            self.toast(f"Sound check failed: {err or 'pw-record error'}")
-        return False
+            "Hear the processed mic on your output in real time")
+        if was_active:
+            log("listen: live test stopped")
 
     # ------------------------------------------------------------ presets
 
