@@ -504,20 +504,24 @@ class Window(Adw.ApplicationWindow):
         self._stop_listen()
 
         def worker():
-            ok = backend.restart_pipewire()
-            GLib.idle_add(self._restart_done, ok)
+            ok, restored_bt = backend.restart_pipewire()
+            GLib.idle_add(self._restart_done, ok, restored_bt)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _restart_done(self, ok):
+    def _restart_done(self, ok, restored_bt=()):
         self.restarting = False
-        log(f"PipeWire restart {'ok' if ok else 'FAILED'}")
+        log(f"PipeWire restart {'ok' if ok else 'FAILED'}"
+            + (f"; reconnected BT: {restored_bt}" if restored_bt else ""))
         if ok:
             self._set_banner(None)
             self._sync_from_live()
             if not self.test_mode:
                 self._start_meters()
             self.toast("Chain is live")
+            if restored_bt:
+                self.toast(f"Reconnected {len(restored_bt)} "
+                           "Bluetooth device(s)")
         else:
             self._set_banner("PipeWire restart failed — check journalctl.",
                              "Retry")

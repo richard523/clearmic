@@ -36,6 +36,54 @@ def filter_node_id():
     return nodes().get(FILTER_INPUT)
 
 
+# ------------------------------------------------------- bluetooth keepalive
+# Restarting PipeWire makes bluetoothd unregister its A2DP endpoints;
+# BT headsets drop the ACL link and never come back on their own.
+
+_MAC_RE = re.compile(r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
+
+
+def bt_connected_devices():
+    """MACs of currently connected Bluetooth devices."""
+    try:
+        r = subprocess.run(["bluetoothctl", "devices", "Connected"],
+                           capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    macs = []
+    for line in r.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and _MAC_RE.match(parts[1]):
+            macs.append(parts[1])
+    return macs
+
+
+def _bt_is_connected(mac):
+    try:
+        r = subprocess.run(["bluetoothctl", "info", mac],
+                           capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return re.search(r"^\s*Connected: yes", r.stdout, re.M) is not None
+
+
+def bt_reconnect(macs):
+    """Reconnect any of `macs` that the restart dropped. Returns the
+    MACs actually reconnected."""
+    restored = []
+    for mac in macs:
+        if _bt_is_connected(mac):
+            continue
+        try:
+            subprocess.run(["bluetoothctl", "connect", mac],
+                           capture_output=True, timeout=12)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if _bt_is_connected(mac):
+            restored.append(mac)
+    return restored
+
+
 def get_controls():
     """Live control values: {'<stage>:<port>': value} for the running chain."""
     nid = filter_node_id()
@@ -100,8 +148,11 @@ def input_devices():
     return devs
 
 
-def restart_pipewire(timeout=20.0):
-    """Restart the PipeWire user services; wait for the chain to return."""
+def restart_pipewire(timeout=25.0):
+    """Restart the PipeWire user services; wait for the chain to return.
+    Bluetooth devices that were connected before the restart and got
+    dropped by it are reconnected."""
+    bt_before = bt_connected_devices()
     subprocess.run(
         ["systemctl", "--user", "restart",
          "pipewire.service", "pipewire-pulse.service", "wireplumber.service"],
@@ -111,8 +162,10 @@ def restart_pipewire(timeout=20.0):
         time.sleep(0.25)
         if filter_node_id() is not None:
             time.sleep(0.5)   # let links settle
-            return True
-    return False
+            restored = bt_reconnect(bt_before)
+            return True, restored
+    restored = bt_reconnect(bt_before)   # chain still down, restore BT anyway
+    return False, restored
 
 
 class Meter:
