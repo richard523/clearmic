@@ -314,6 +314,9 @@ class Window(Adw.ApplicationWindow):
     # ------------------------------------------------------------ startup
 
     def _startup(self):
+        stale = backend.kill_stale()
+        if stale:
+            log(f"killed stale audio procs from a previous run: {stale}")
         log(f"startup: input={self.state['input']} "
             f"stages={[s for s, v in self.state['stages'].items()
                       if v['enabled']]} test_mode={self.test_mode}")

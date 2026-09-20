@@ -1,15 +1,50 @@
 """PipeWire interop: live control values, runtime set-param, meters, monitor,
 restart. All via the pw-* CLI tools (no native bindings needed)."""
 import array
+import ctypes
 import json
 import math
+import os
 import re
+import signal
 import subprocess
 import threading
 import time
 
 FILTER_INPUT = "effect_input.rnnoise"    # graph-controls live on this node
 FILTER_OUTPUT = "effect_output.rnnoise"  # virtual source
+
+_PR_SET_PDEATHSIG = 1  # Linux prctl option
+
+
+def _die_with_parent():
+    """preexec_fn: ask the kernel to kill this child if the app dies,
+    however it dies (crash, SIGKILL, ...). Prevents orphaned
+    pw-loopback / pw-record processes routing the mic forever."""
+    try:
+        ctypes.CDLL("libc.so.6", use_errno=True).prctl(
+            _PR_SET_PDEATHSIG, signal.SIGTERM)
+    except Exception:
+        pass  # non-Linux: fall back to explicit stop() only
+
+
+def kill_stale():
+    """Kill orphaned pw-loopback/pw-record processes from a previous,
+    abnormally-exited instance that still target our nodes. Called at
+    startup, before this instance spawns its own."""
+    patterns = [f"pw-loopback -C {FILTER_OUTPUT}",
+                f"pw-record .*--target {FILTER_OUTPUT}"]
+    killed = []
+    for pat in patterns:
+        r = subprocess.run(["pgrep", "-f", pat],
+                           capture_output=True, text=True)
+        for pid_s in r.stdout.split():
+            try:
+                os.kill(int(pid_s), signal.SIGTERM)
+                killed.append(int(pid_s))
+            except (ValueError, ProcessLookupError, PermissionError):
+                pass
+    return killed
 
 
 def run(*args):
@@ -184,7 +219,8 @@ class Meter:
             ["pw-record", "--raw", "--format", "s16", "--channels", "1",
              "--rate", "48000", "--latency", "20ms",
              "--target", self.target, "-"],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            preexec_fn=_die_with_parent)
         t = threading.Thread(target=self._read, daemon=True)
         t.start()
 
@@ -235,7 +271,8 @@ class Monitor:
             return
         self.proc = subprocess.Popen(
             ["pw-loopback", "-C", FILTER_OUTPUT],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            preexec_fn=_die_with_parent)
 
     def stop(self):
         if self.proc:
