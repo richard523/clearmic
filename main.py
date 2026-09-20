@@ -27,6 +27,18 @@ APP_ID = "org.chardlinux.MicDSP"
 STATE_DIR = os.path.expanduser("~/.config/mic-dsp-ui")
 STATE_PATH = os.path.join(STATE_DIR, "state.json")
 PRESETS_DIR = os.path.join(STATE_DIR, "presets")
+LOG_PATH = os.path.join(GLib.get_user_cache_dir(), "mic-dsp-ui", "app.log")
+
+
+def log(msg):
+    """Append to the app log — the only persistent record when launched
+    from the desktop (stderr goes nowhere)."""
+    try:
+        os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
+        with open(LOG_PATH, "a") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------- state I/O
@@ -284,6 +296,9 @@ class Window(Adw.ApplicationWindow):
     # ------------------------------------------------------------ startup
 
     def _startup(self):
+        log(f"startup: input={self.state['input']} "
+            f"stages={[s for s, v in self.state['stages'].items()
+                      if v['enabled']]} test_mode={self.test_mode}")
         self._refresh_devices()
         self._refresh_all_rows()
         confgen.write(self.state)
@@ -455,6 +470,7 @@ class Window(Adw.ApplicationWindow):
             try:
                 backend.set_controls(applicable, toggles)
             except RuntimeError as e:
+                log(f"set_controls failed: {e}")
                 self.toast(f"Could not apply: {e}")
         save_state(self.state)
         confgen.write(self.state)
@@ -488,6 +504,7 @@ class Window(Adw.ApplicationWindow):
         self._apply_structural()
 
     def _apply_structural(self):
+        log("structural change: restarting PipeWire")
         self.restarting = True
         self.toast("Restarting PipeWire to rebuild the chain…")
         self._set_status("restarting…")
@@ -502,6 +519,7 @@ class Window(Adw.ApplicationWindow):
 
     def _restart_done(self, ok):
         self.restarting = False
+        log(f"PipeWire restart {'ok' if ok else 'FAILED'}")
         if ok:
             self._set_banner(None)
             self._sync_from_live()
@@ -603,19 +621,27 @@ class Window(Adw.ApplicationWindow):
             os.unlink(path)
         except FileNotFoundError:
             pass
-        subprocess.run(
+        log(f"soundcheck: recording {self.SC_SECONDS}s -> {path}")
+        rec = subprocess.run(
             ["pw-record", "--target", backend.FILTER_OUTPUT,
              "--sample-count", str(self.SC_SECONDS * 48000), path],
             capture_output=True, timeout=30)
+        size = os.path.getsize(path) if os.path.exists(path) else 0
         # pw-record exits nonzero after a clean --sample-count finish;
         # judge success by the file it wrote instead.
-        if not os.path.exists(path) or \
-                os.path.getsize(path) < 2 * 48000 * self.SC_SECONDS:
+        if size < 2 * 48000 * self.SC_SECONDS:
+            log(f"soundcheck: recording failed "
+                f"(exit={rec.returncode}, size={size})")
+            log(f"soundcheck: pw-record stderr: "
+                f"{rec.stderr.decode(errors='replace')[-500:]}")
             GLib.idle_add(self._soundcheck_done, False,
                           "pw-record produced no usable audio")
             return
+        log(f"soundcheck: recorded {size} bytes, playing back")
         GLib.idle_add(self._soundcheck_playing)
-        subprocess.run(["pw-play", path], capture_output=True, timeout=30)
+        play = subprocess.run(["pw-play", path], capture_output=True,
+                              timeout=30)
+        log(f"soundcheck: playback done (exit={play.returncode})")
         GLib.idle_add(self._soundcheck_done, True, "")
 
     def _soundcheck_playing(self):
