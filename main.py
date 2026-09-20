@@ -599,13 +599,20 @@ class Window(Adw.ApplicationWindow):
         path = os.path.join(GLib.get_user_cache_dir(), "mic-dsp-ui",
                             "soundcheck.wav")
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        r = subprocess.run(
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        subprocess.run(
             ["pw-record", "--target", backend.FILTER_OUTPUT,
              "--sample-count", str(self.SC_SECONDS * 48000), path],
             capture_output=True, timeout=30)
-        if r.returncode != 0:
+        # pw-record exits nonzero after a clean --sample-count finish;
+        # judge success by the file it wrote instead.
+        if not os.path.exists(path) or \
+                os.path.getsize(path) < 2 * 48000 * self.SC_SECONDS:
             GLib.idle_add(self._soundcheck_done, False,
-                          r.stderr.decode(errors="replace").strip())
+                          "pw-record produced no usable audio")
             return
         GLib.idle_add(self._soundcheck_playing)
         subprocess.run(["pw-play", path], capture_output=True, timeout=30)
