@@ -202,7 +202,12 @@ class Window(Adw.ApplicationWindow):
         body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10,
                        margin_top=10, margin_bottom=10,
                        margin_start=12, margin_end=12)
-        toolbar.set_content(body)
+        # vertical scrolling: lets the window shrink below the natural
+        # content height instead of forcing a tall minimum
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_child(body)
+        toolbar.set_content(scroll)
 
         # --- signal group (device + meters)
         sig_group = Adw.PreferencesGroup(title="Signal")
