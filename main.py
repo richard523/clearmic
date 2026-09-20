@@ -195,6 +195,17 @@ class Window(Adw.ApplicationWindow):
         self.out_bar = LevelBar()
         out_row.add_suffix(self.out_bar)
         sig_group.add(out_row)
+
+        # --- sound check
+        self._checking = False
+        self.sc_row = Adw.ActionRow(
+            title="Sound check",
+            subtitle="Record 5 s from the processed mic and play it back")
+        self.soundcheck_btn = Gtk.Button(label="Record",
+                                         valign=Gtk.Align.CENTER)
+        self.soundcheck_btn.connect("clicked", self._on_soundcheck)
+        self.sc_row.add_suffix(self.soundcheck_btn)
+        sig_group.add(self.sc_row)
         body.append(sig_group)
 
         # --- stage tabs
@@ -567,6 +578,54 @@ class Window(Adw.ApplicationWindow):
         self.listen_btn.set_active(False)
         self.listen_btn.handler_unblock_by_func(self._on_listen)
 
+    # ------------------------------------------------------------ sound check
+
+    SC_SECONDS = 5
+
+    def _on_soundcheck(self, *_):
+        if self._checking:
+            return
+        if backend.filter_node_id() is None:
+            self.toast("Filter chain is not running")
+            return
+        self._checking = True
+        self.soundcheck_btn.set_sensitive(False)
+        self.sc_row.set_subtitle(f"Recording {self.SC_SECONDS} s…")
+        threading.Thread(target=self._soundcheck_worker,
+                         daemon=True).start()
+
+    def _soundcheck_worker(self):
+        import subprocess
+        path = os.path.join(GLib.get_user_cache_dir(), "mic-dsp-ui",
+                            "soundcheck.wav")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        r = subprocess.run(
+            ["pw-record", "--target", backend.FILTER_OUTPUT,
+             "--sample-count", str(self.SC_SECONDS * 48000), path],
+            capture_output=True, timeout=30)
+        if r.returncode != 0:
+            GLib.idle_add(self._soundcheck_done, False,
+                          r.stderr.decode(errors="replace").strip())
+            return
+        GLib.idle_add(self._soundcheck_playing)
+        subprocess.run(["pw-play", path], capture_output=True, timeout=30)
+        GLib.idle_add(self._soundcheck_done, True, "")
+
+    def _soundcheck_playing(self):
+        self.sc_row.set_subtitle("Playing back…")
+        return False
+
+    def _soundcheck_done(self, ok, err):
+        self._checking = False
+        self.soundcheck_btn.set_sensitive(True)
+        self.sc_row.set_subtitle(
+            "Record 5 s from the processed mic and play it back")
+        if ok:
+            self.toast("Sound check finished")
+        else:
+            self.toast(f"Sound check failed: {err or 'pw-record error'}")
+        return False
+
     # ------------------------------------------------------------ presets
 
     def _preset_files(self):
@@ -645,7 +704,13 @@ class App(Adw.Application):
         self.win = None
 
     def do_activate(self):
-        self.win = Window(self, test_mode=self.test_mode)
+        try:
+            self.win = Window(self, test_mode=self.test_mode)
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            self.quit()
+            return
         a_none = Gio.SimpleAction.new("preset-none", None)
         a_none.connect("activate", lambda *_: None)
         self.win.add_action(a_none)
