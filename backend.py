@@ -71,6 +71,33 @@ def filter_node_id():
     return nodes().get(FILTER_INPUT)
 
 
+def filter_capture_device():
+    """node.name of the source currently feeding the filter chain, or
+    None (chain absent, or not linked to a capture device)."""
+    r = run("pw-dump")
+    try:
+        d = json.loads(r.stdout)
+    except json.JSONDecodeError:
+        return None
+    names = {}
+    fid = None
+    for o in d:
+        props = o.get("info", {}).get("props", {}) or {}
+        if o.get("type", "").endswith("Node"):
+            names[o["id"]] = props.get("node.name")
+            if props.get("node.name") == FILTER_INPUT:
+                fid = o["id"]
+    if fid is None:
+        return None
+    for o in d:
+        if o.get("type") != "PipeWire:Interface:Link":
+            continue
+        props = o.get("info", {}).get("props", {}) or {}
+        if props.get("link.input.node") == fid:
+            return names.get(props.get("link.output.node"))
+    return None
+
+
 # ------------------------------------------------------- bluetooth keepalive
 # Restarting PipeWire makes bluetoothd unregister its A2DP endpoints;
 # BT headsets drop the ACL link and never come back on their own.

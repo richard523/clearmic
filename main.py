@@ -65,7 +65,12 @@ def load_state():
     _migrate_state_dir()
     if os.path.exists(STATE_PATH):
         with open(STATE_PATH) as f:
-            return json.load(f), False, False
+            st = json.load(f)
+        # older versions stored the full label incl. the stage list;
+        # keep only the base device description
+        st["source_desc"] = re.sub(r"\s*\([^()]*\)\s*$", "",
+                                  st.get("source_desc", "ClearMic"))
+        return st, False, False
     migrated = confgen.migrate()
     if migrated is not None:
         save_state(migrated)
@@ -74,6 +79,7 @@ def load_state():
     devs = backend.input_devices()
     if devs:
         st["input"] = devs[0][0]
+        st["source_desc"] = devs[0][1] or devs[0][0]
     return st, False, True
 
 
@@ -166,6 +172,7 @@ class Window(Adw.ApplicationWindow):
         self.restarting = False
         self._preset_map = {}
         self._dev_names = []
+        self._dev_descs = []
 
         self._build_ui()
         self._startup()
@@ -375,18 +382,33 @@ class Window(Adw.ApplicationWindow):
         devs = backend.input_devices()
         store = Gtk.StringList()
         self._dev_names = []
+        self._dev_descs = []
         sel = 0
         for i, (name, desc) in enumerate(devs):
-            store.append(desc or name)
+            label = desc or name
+            store.append(label)
             self._dev_names.append(name)
+            self._dev_descs.append(label)
             if name == self.state.get("input"):
                 sel = i
         self.dev_combo.handler_block_by_func(self._on_device_selected)
         self.dev_combo.set_model(store)
         if self._dev_names:
+            cur = self.state.get("input")
+            if cur not in self._dev_names:
+                # pinned device is gone: adopt the device the chain is
+                # actually capturing from, else the first available one
+                live = backend.filter_capture_device()
+                pick = live if live in self._dev_names else self._dev_names[0]
+                sel = self._dev_names.index(pick)
+                self.state["input"] = pick
+                self.state["source_desc"] = self._dev_descs[sel]
+                save_state(self.state)
+                confgen.write(self.state)
+                if cur:
+                    log(f"input device '{cur}' is not present; "
+                        f"using '{pick}' instead")
             self.dev_combo.set_selected(sel)
-            if not self.state.get("input"):
-                self.state["input"] = self._dev_names[sel]
         self.dev_combo.handler_unblock_by_func(self._on_device_selected)
 
     def _refresh_all_rows(self):
@@ -587,6 +609,7 @@ class Window(Adw.ApplicationWindow):
         if name == self.state.get("input"):
             return
         self.state["input"] = name
+        self.state["source_desc"] = self._dev_descs[idx]
         save_state(self.state)
         confgen.write(self.state)
         self._apply_structural()

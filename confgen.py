@@ -48,6 +48,8 @@ def generate(state):
             f'            {{ output = "{a}:{pa["out_r"]}" input = "{b}:{pb["in_r"]}" }}'
         )
     desc = state.get("source_desc", "ClearMic")
+    if enabled:
+        desc = f"{desc} ({' + '.join(enabled)})"
     target = state.get("input", "")
     nodes_joined = "\n".join(nodes_txt)
     links_joined = "\n".join(links_txt)
@@ -104,7 +106,8 @@ def parse_legacy(path=OLD_CONF):
         state["input"] = m.group(1)
     m = re.search(r'node\.description\s*=\s*"([^"]+)"', text)
     if m:
-        state["source_desc"] = m.group(1)
+        # legacy descriptions carry a "(stages)" suffix; keep the base only
+        state["source_desc"] = re.sub(r"\s*\([^()]*\)\s*$", "", m.group(1))
 
     known = {s: {p["port"]: p for p in STAGE_INFO[s]["params"]} for s in STAGES}
     for m in re.finditer(
