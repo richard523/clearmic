@@ -51,6 +51,17 @@ def generate(state):
     if enabled:
         desc = f"{desc} ({' + '.join(enabled)})"
     target = state.get("input", "")
+    # "auto" (or empty): leave the capture stream unpinned. WirePlumber
+    # then links it to the default input device and MOVES it live when
+    # devices appear/disappear (bluetooth connect, HFP profile switch,
+    # USB plug) - no PipeWire restart, no node.name races. Pinning is
+    # kept as a manual option, but a pinned node that registers late
+    # (all bluetooth mics) is not re-resolved by WirePlumber, so the
+    # chain silently falls back to another source.
+    capture_pin = ""
+    if target and target != "auto":
+        capture_pin = (f'        node.target   = "{target}"\n'
+                       f'        target.object = "{target}"\n')
     nodes_joined = "\n".join(nodes_txt)
     links_joined = "\n".join(links_txt)
     return f"""\
@@ -73,8 +84,7 @@ context.modules = [
       capture.props = {{
         node.name    = {INPUT_NODE}
         node.passive = true
-        node.target  = "{target}"
-      }}
+{capture_pin}      }}
       playback.props = {{
         node.name   = {OUTPUT_NODE}
         media.class = Audio/Source

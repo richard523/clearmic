@@ -76,10 +76,8 @@ def load_state():
         save_state(migrated)
         return migrated, True, False
     st = default_state()
-    devs = backend.input_devices()
-    if devs:
-        st["input"] = devs[0][0]
-        st["source_desc"] = devs[0][1] or devs[0][0]
+    st["input"] = "auto"
+    st["source_desc"] = "Default input device"
     return st, False, True
 
 
@@ -173,6 +171,7 @@ class Window(Adw.ApplicationWindow):
         self._preset_map = {}
         self._dev_names = []
         self._dev_descs = []
+        self._bt_rows = []
 
         self._build_ui()
         self._startup()
@@ -218,9 +217,16 @@ class Window(Adw.ApplicationWindow):
 
         # --- signal group (device + meters)
         sig_group = Adw.PreferencesGroup(title="Signal")
+        self.sig_group = sig_group
         self.dev_combo = Adw.ComboRow(title="Input device",
                                       subtitle="capture target of the chain")
         self.dev_combo.connect("notify::selected", self._on_device_selected)
+        refresh_btn = Gtk.Button(icon_name="view-refresh-symbolic",
+                                 valign=Gtk.Align.CENTER)
+        refresh_btn.set_tooltip_text("Rescan devices (e.g. after connecting "
+                                     "a Bluetooth headset)")
+        refresh_btn.connect("clicked", self._on_refresh_devices)
+        self.dev_combo.add_suffix(refresh_btn)
         sig_group.add(self.dev_combo)
 
         raw_row = Adw.ActionRow(title="Raw", subtitle="input device level")
@@ -328,6 +334,7 @@ class Window(Adw.ApplicationWindow):
             f"stages={[s for s, v in self.state['stages'].items()
                       if v['enabled']]} test_mode={self.test_mode}")
         self._refresh_devices()
+        self._bt_autorestore_quality()
         self._refresh_all_rows()
         confgen.write(self.state)
         if self.migrated:
@@ -355,7 +362,12 @@ class Window(Adw.ApplicationWindow):
 
     def _start_meters(self):
         self._stop_meters()
-        self.meters["raw"] = backend.Meter(self.state["input"])
+        raw_target = self.state["input"]
+        if raw_target == "auto" or not raw_target:
+            # follow mode: meter the device the chain is capturing from
+            raw_target = backend.filter_capture_device() \
+                or backend.FILTER_OUTPUT
+        self.meters["raw"] = backend.Meter(raw_target)
         self.meters["out"] = backend.Meter(backend.FILTER_OUTPUT)
         self.raw_bar.meter = self.meters["raw"]
         self.out_bar.meter = self.meters["out"]
@@ -380,36 +392,108 @@ class Window(Adw.ApplicationWindow):
 
     def _refresh_devices(self):
         devs = backend.input_devices()
+        desc_of = dict(devs)
         store = Gtk.StringList()
-        self._dev_names = []
-        self._dev_descs = []
+        self._dev_names = ["auto"]
+        self._dev_descs = ["Follow default input device"]
+        store.append("Follow default input device")
         sel = 0
-        for i, (name, desc) in enumerate(devs):
+
+        def _mac(s):
+            return s.replace(":", "").replace("_", "").lower()
+
+        # bluetooth headsets cannot be part of this list: their mic
+        # nodes register too late to be pinned. The chain follows the
+        # default device; headset mode is controlled by dedicated
+        # toggle buttons built below.
+        for name, desc in devs:
+            if name.startswith("bluez_input."):
+                continue
             label = desc or name
             store.append(label)
             self._dev_names.append(name)
             self._dev_descs.append(label)
             if name == self.state.get("input"):
-                sel = i
+                sel = len(self._dev_names) - 1
+
+        # rebuild the bluetooth mode rows (state, not selection)
+        for row in self._bt_rows:
+            self.sig_group.remove(row)
+        self._bt_rows = []
+        for c in backend.bt_cards():
+            row = Adw.ActionRow(
+                title=c["desc"] or c["card"],
+                subtitle=("HFP: mic active, low-quality playback"
+                          if c["mic"] else
+                          "A2DP: high-quality playback, no mic"))
+            box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                          spacing=6, valign=Gtk.Align.CENTER)
+            btn_q = Gtk.ToggleButton(label="High quality")
+            btn_m = Gtk.ToggleButton(label="Mic mode", group=btn_q)
+            btn_q.set_active(not c["mic"])
+            btn_m.set_active(c["mic"])
+            btn_q.connect("toggled", self._on_bt_mode_btn,
+                           c["card"], "quality")
+            btn_m.connect("toggled", self._on_bt_mode_btn,
+                           c["card"], "mic")
+            box.append(btn_q)
+            box.append(btn_m)
+            row.add_suffix(box)
+            self.sig_group.add(row)
+            self._bt_rows.append(row)
+
         self.dev_combo.handler_block_by_func(self._on_device_selected)
         self.dev_combo.set_model(store)
-        if self._dev_names:
-            cur = self.state.get("input")
-            if cur not in self._dev_names:
+        cur = self.state.get("input")
+        if cur and cur.startswith("bluez_input."):
+            # legacy pin to a bluetooth mic: these cannot be pinned;
+            # migrate to follow mode
+            self.state["input"] = "auto"
+            self.state["source_desc"] = "Default input device"
+            save_state(self.state)
+            confgen.write(self.state)
+            log(f"migrated bluetooth pin '{cur}' to follow mode")
+            cur = "auto"
+        if cur and cur != "auto" and cur not in self._dev_names:
                 # pinned device is gone: adopt the device the chain is
-                # actually capturing from, else the first available one
+                # actually capturing from, else fall back to "auto"
                 live = backend.filter_capture_device()
-                pick = live if live in self._dev_names else self._dev_names[0]
-                sel = self._dev_names.index(pick)
+                if live in self._dev_names:
+                    pick = live
+                else:
+                    pick = "auto"
+                sel = 0 if pick == "auto" else self._dev_names.index(pick)
                 self.state["input"] = pick
                 self.state["source_desc"] = self._dev_descs[sel]
                 save_state(self.state)
                 confgen.write(self.state)
-                if cur:
-                    log(f"input device '{cur}' is not present; "
-                        f"using '{pick}' instead")
-            self.dev_combo.set_selected(sel)
+                log(f"input device '{cur}' is not present; "
+                    f"using '{pick}' instead")
+        self.dev_combo.set_selected(sel)
         self.dev_combo.handler_unblock_by_func(self._on_device_selected)
+        # subtitle: in follow mode show what is being filtered right now
+        if self.state.get("input") in ("", "auto"):
+            live = backend.filter_capture_device()
+            txt = desc_of.get(live, live) if live else "no device"
+            self.dev_combo.set_subtitle(
+                f"following default device - now: {txt}")
+        else:
+            self.dev_combo.set_subtitle("capture target of the chain")
+
+    # -------------------------------------------------- bluetooth modes
+
+    def _on_bt_mode_btn(self, btn, card, mode):
+        """A headset mode button was pressed. Ignore deselection (the
+        button pair flips; only the newly active one acts)."""
+        if not btn.get_active() or self.restarting:
+            return
+        info = next((c for c in backend.bt_cards()
+                     if c["card"] == card), None)
+        if info is None:
+            return
+        if (mode == "mic") == info["mic"]:
+            return  # already in that mode; refresh keeps buttons honest
+        self._bt_apply(card, mode)
 
     def _refresh_all_rows(self):
         """Push state values into every widget (without emitting changes)."""
@@ -599,6 +683,13 @@ class Window(Adw.ApplicationWindow):
 
     # ------------------------------------------------------------ devices
 
+    def _on_refresh_devices(self, *_):
+        if self.restarting:
+            return
+        self._refresh_devices()
+        self._bt_autorestore_quality()
+        self.toast("Device list refreshed")
+
     def _on_device_selected(self, *_):
         if not self._dev_names or self.restarting:
             return
@@ -609,10 +700,119 @@ class Window(Adw.ApplicationWindow):
         if name == self.state.get("input"):
             return
         self.state["input"] = name
-        self.state["source_desc"] = self._dev_descs[idx]
+        self.state["source_desc"] = ("Default input device" if name == "auto"
+                                     else self._dev_descs[idx])
         save_state(self.state)
         confgen.write(self.state)
         self._apply_structural()
+
+    # -------------------------------------------------- bluetooth modes
+
+    def _bt_autorestore_quality(self):
+        """High-quality playback is the bluetooth default: when a
+        headset sits in mic mode but nothing captures its mic (the
+        chain moved on, e.g. the USB headset was plugged in), return
+        it to A2DP. Never called right after a mic-mode selection, so
+        it cannot fight an explicit user choice."""
+        if self.restarting:
+            return
+        live = backend.filter_capture_device()
+        if not live or live.startswith("bluez_input."):
+            return  # unlinked (unknown state) or the headset mic is in use
+        if (self.state.get("input") or "").startswith("bluez_input."):
+            return  # user explicitly pinned the headset mic
+        cards = [c["card"] for c in backend.bt_cards() if c["mic"]]
+        if not cards:
+            return
+        self.restarting = True
+
+        def worker():
+            results = {card: backend.bt_set_quality_mode(card)
+                       for card in cards}
+            GLib.idle_add(self._bt_autorestore_done, results)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _bt_autorestore_done(self, results):
+        self.restarting = False
+        if "wedged" in results.values():
+            self.toast("PipeWire stopped responding - restarting it…")
+
+            def worker():
+                ok, _ = backend.restart_pipewire()
+                GLib.idle_add(self._bt_wedge_recovered, ok)
+
+            threading.Thread(target=worker, daemon=True).start()
+            return
+        if "ok" in results:
+            self.toast("Bluetooth: restored high-quality mode "
+                       "(mic not in use)")
+        self._refresh_devices()
+
+    def _bt_apply(self, card, mode):
+        if self.restarting:
+            return
+        # a pinned input would keep the chain off the headset mic:
+        # follow mode is required for bluetooth to work at all
+        if self.state.get("input") not in ("", "auto"):
+            self.state["input"] = "auto"
+            self.state["source_desc"] = "Default input device"
+            save_state(self.state)
+            confgen.write(self.state)
+        self.restarting = True
+        if mode == "mic":
+            self._set_status("switching headset to mic mode…")
+            self.toast("Bluetooth: switching to mic mode "
+                       "(playback quality drops)…")
+
+            def worker():
+                node = backend.bt_set_mic_mode(card)
+                GLib.idle_add(self._bt_mode_done, mode,
+                              node is not None)
+
+            threading.Thread(target=worker, daemon=True).start()
+        else:
+            self._set_status("restoring high-quality mode…")
+            self.toast("Bluetooth: restoring high-quality mode…")
+
+            def worker():
+                result = backend.bt_set_quality_mode(card)
+                GLib.idle_add(self._bt_mode_done, mode,
+                              result == "ok", result)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+    def _bt_mode_done(self, mode, ok, detail=""):
+        self.restarting = False
+        self._set_status("")
+        if ok:
+            if mode == "mic":
+                self.toast("Headset mic active - the chain follows it "
+                           "while it is the default input")
+            else:
+                self.toast("High-quality playback restored (no mic)")
+            self._refresh_devices()
+            return
+        if detail == "wedged":
+            # known upstream bug: HFP transport teardown can leave
+            # PipeWire unresponsive; recover by restarting it
+            self.toast("PipeWire stopped responding - restarting it…")
+            self._set_status("restarting…")
+
+            def worker():
+                ok2, _ = backend.restart_pipewire()
+                GLib.idle_add(self._bt_wedge_recovered, ok2)
+
+            threading.Thread(target=worker, daemon=True).start()
+        else:
+            self.toast("Could not switch the headset profile")
+            self._refresh_devices()
+
+    def _bt_wedge_recovered(self, ok):
+        self._set_status("live" if ok else "error")
+        self.toast("PipeWire restarted"
+                   + ("" if ok else " - still failing, check journalctl"))
+        self._refresh_devices()
 
     # ------------------------------------------------------------ listen
 
@@ -758,6 +958,7 @@ class App(Adw.Application):
             self.win = Window(self, test_mode=self.test_mode)
         except Exception:
             import traceback
+            log("window construction failed: " + traceback.format_exc())
             traceback.print_exc()
             self.quit()
             return

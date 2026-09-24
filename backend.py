@@ -194,7 +194,9 @@ def set_controls(pairs, toggle_keys=frozenset()):
 
 
 def input_devices():
-    """[(node.name, description)] for ALSA capture devices."""
+    """[(node.name, description)] for capture devices: ALSA or Bluetooth
+    (BT mics appear as bluez_input.*/bluez_output.* Audio/Source nodes,
+    present only while the headset is connected in HFP/HSP profile)."""
     r = run("pw-dump")
     try:
         d = json.loads(r.stdout)
@@ -204,10 +206,143 @@ def input_devices():
     for obj in d:
         props = obj.get("info", {}).get("props", {}) or {}
         name = props.get("node.name", "")
-        if name.startswith("alsa_input.") and \
+        if (name.startswith("alsa_input.")
+                or name.startswith("bluez_input.")
+                or name.startswith("bluez_output.")) and \
                 props.get("media.class") == "Audio/Source":
             devs.append((name, props.get("node.description", name)))
     return devs
+
+
+# ------------------------------------------------------- bluetooth profiles
+# A BT headset has two mutually exclusive states: an A2DP profile
+# (high-quality playback, NO capture node) or a headset profile
+# (mic available, low-quality playback). ClearMic surfaces both.
+
+def bt_cards():
+    """Bluetooth audio cards: [{card, desc, profile, mic}] via pactl.
+    mic is True when the active profile exposes a capture source
+    (headset-head-unit / HFP or HSP)."""
+    r = run("pactl", "list", "cards")
+    out, cur = [], None
+    for line in r.stdout.splitlines():
+        if line.startswith("Card #"):
+            if cur and cur["card"].startswith("bluez_card."):
+                cur["mic"] = cur["profile"].startswith("headset")
+                out.append(cur)
+            cur = {"card": "", "desc": "", "profile": ""}
+            continue
+        if cur is None:
+            continue
+        s = line.strip()
+        if s.startswith("Name: "):
+            cur["card"] = s[6:]
+        elif s.startswith("Active Profile: "):
+            cur["profile"] = s[16:]
+        elif s.startswith("device.description = "):
+            cur["desc"] = s[21:].strip('"')
+    if cur and cur["card"].startswith("bluez_card."):
+        cur["mic"] = cur["profile"].startswith("headset")
+        out.append(cur)
+    return out
+
+
+def _card_profiles(card):
+    """Names of the card's available profiles, from pactl."""
+    r = run("pactl", "list", "cards")
+    profiles, in_profiles, cur = [], False, None
+    for line in r.stdout.splitlines():
+        s = line.strip()
+        if s.startswith("Name: "):
+            cur = s[6:]
+            in_profiles = False
+        elif cur == card and s == "Profiles:":
+            in_profiles = True
+        elif in_profiles and s.startswith("Active Profile"):
+            break
+        elif in_profiles and ":" in s and s.endswith(")") and \
+                not s.endswith("no)") and "available" in s:
+            profiles.append(s.split(":", 1)[0].strip())
+    return profiles
+
+
+def bt_set_mic_mode(card, timeout=15.0):
+    """Switch a bluetooth card to a headset (mic) profile and wait for
+    its capture node to register. Returns the bluez_input node name,
+    or None if the switch failed or the node never appeared."""
+    r = run("pactl", "set-card-profile", card, "headset-head-unit")
+    if r.returncode != 0:
+        # device without HFP: fall back to any available headset profile
+        prof = next((p for p in _card_profiles(card)
+                     if p.startswith("headset")), None)
+        if prof is None or \
+                run("pactl", "set-card-profile", card,
+                    prof).returncode != 0:
+            return None
+    mac = card.split(".", 1)[1]
+    key = mac.replace(":", "").replace("_", "").lower()
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for name, _ in input_devices():
+            if name.startswith("bluez_input.") and \
+                    name.split(".", 1)[1].replace(":", "") \
+                    .replace("_", "").lower() == key:
+                return name
+        time.sleep(0.5)
+    return None
+
+
+def _bt_reconnect(card, timeout=25.0):
+    """Disconnect + reconnect a bluetooth device (by card name) so that
+    bluetoothd re-registers its media endpoints. A PipeWire restart
+    while the device is connected can leave the A2DP endpoints
+    unregistered, leaving the card with only the headset profile.
+    Returns True once the card offers an A2DP profile again."""
+    mac = card.split(".", 1)[1].replace("_", ":")
+    try:
+        subprocess.run(["bluetoothctl", "disconnect", mac],
+                       capture_output=True, timeout=8)
+        subprocess.run(["bluetoothctl", "connect", mac],
+                       capture_output=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        r = run("pactl", "list", "cards")
+        if f"Name: {card}" in r.stdout and \
+                any(p.startswith("a2dp") for p in _card_profiles(card)):
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def bt_set_quality_mode(card):
+    """Switch a bluetooth card back to A2DP (high-quality playback,
+    no mic). If the A2DP endpoints were lost (PipeWire restart while
+    connected), the device is reconnected first to re-register them.
+    Tearing down an active HFP transport can wedge PipeWire (bluez5
+    bug on this stack), so the daemon is probed afterwards.
+    Returns "ok", "wedged" (caller should restart PipeWire) or
+    "failed"."""
+    prof = next((p for p in _card_profiles(card) if p.startswith("a2dp")),
+                None)
+    if prof is None:
+        if not _bt_reconnect(card):
+            return "failed"
+        prof = next((p for p in _card_profiles(card)
+                     if p.startswith("a2dp")), None)
+        if prof is None:
+            return "failed"
+    if run("pactl", "set-card-profile", card, prof).returncode != 0:
+        return "failed"
+    try:
+        r = subprocess.run(["pw-cli", "ls", "Node"], capture_output=True,
+                           timeout=6)
+        if r.returncode == 0:
+            return "ok"
+    except subprocess.TimeoutExpired:
+        pass
+    return "wedged"
 
 
 def restart_pipewire(timeout=25.0):
