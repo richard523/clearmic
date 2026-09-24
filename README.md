@@ -71,3 +71,21 @@ PipeWire. App state lives in `~/.config/clearmic/`.
 ## License
 
 GPL-3.0-or-later — see [LICENSE](LICENSE).
+
+## Screenshots
+
+**Signal group — chain input, level meters, and per-headset bluetooth modes.**
+
+1. Follow-default mode with the headset in high-quality A2DP — the default.
+   No mic exists in this state (bluetooth profile, not a bug); the combo
+   subtitle shows what the chain is filtering right now.
+   ![Signal: high quality A2DP](screenshots/01-signal-bluetooth-high-quality.png)
+
+2. Mic mode: one click flips the headset to HFP. The mic appears
+   system-wide, the chain follows it, and playback quality drops —
+   the buttons always show the real state.
+   ![Signal: bluetooth mic mode](screenshots/02-signal-bluetooth-mic-mode.png)
+
+3. Every DSP stage is a tab of live sliders (gate, RNNoise/DeepFilter,
+   de-esser, SC4, autogain, limiter) — applied without restarts.
+   ![RNNoise stage tuning](screenshots/03-rnnoise-stage.png)
