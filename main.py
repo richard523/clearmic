@@ -175,6 +175,7 @@ class Window(Adw.ApplicationWindow):
         self.enabled_switches = {}
         self.param_rows = {}      # (stage, port) -> record
         self.restarting = False
+        self._pending_structural = False
         self._preset_actions = []
         self._bt_rows = []
 
@@ -584,8 +585,6 @@ class Window(Adw.ApplicationWindow):
     # ------------------------------------------------------------ structural
 
     def _on_stage_enable(self, sw, _pspec, stage):
-        if self.restarting:
-            return
         enabled = sw.get_active()
         if enabled:
             self.state["stages"][stage]["enabled"] = True
@@ -606,10 +605,17 @@ class Window(Adw.ApplicationWindow):
         save_state(self.state)
         confgen.write(self.state)
         self._refresh_all_rows()
+        if self.restarting:
+            # The conf is already written, so the running restart will
+            # most likely pick it up; queue a rebuild anyway to make
+            # sure, instead of silently dropping the change.
+            self._pending_structural = True
+            return
         self._apply_structural()
 
     def _apply_structural(self):
         log("structural change: restarting PipeWire")
+        self._pending_structural = False
         self.restarting = True
         self.toast("Restarting PipeWire to rebuild the chain…")
         self._set_status("restarting…")
@@ -617,7 +623,12 @@ class Window(Adw.ApplicationWindow):
         self._stop_listen()
 
         def worker():
-            ok, restored_bt = backend.restart_pipewire()
+            try:
+                ok, restored_bt = backend.restart_pipewire()
+            except Exception:
+                log("pipewire restart crashed:\n"
+                    + traceback.format_exc())
+                ok, restored_bt = False, ()
             GLib.idle_add(self._restart_done, ok, restored_bt)
 
         threading.Thread(target=worker, daemon=True).start()
@@ -629,16 +640,25 @@ class Window(Adw.ApplicationWindow):
         if ok:
             self._set_banner(None)
             self._sync_from_live()
+            # _sync_from_live can bail out early (the chain
+            # instantiates lazily), so never leave it to set the
+            # status — that is how "restarting…" got stuck.
+            ids = backend.chain_node_ids()
+            self._set_status(f"live · {len(ids)} mic(s) attached"
+                             if ids else "live")
             if not self.test_mode:
                 self._start_meters()
             self.toast("Chain is live")
             if restored_bt:
                 self.toast(f"Reconnected {len(restored_bt)} "
                            "Bluetooth device(s)")
-        else:
-            self._set_banner("PipeWire restart failed — check journalctl.",
-                             "Retry")
-            self._set_status("error")
+            if self._pending_structural:
+                # a stage changed while the restart ran; rebuild again
+                self._apply_structural()
+            return
+        self._set_banner("PipeWire restart failed — check journalctl.",
+                         "Retry")
+        self._set_status("error")
 
     # ------------------------------------------------------------ banner/toast
 
@@ -686,8 +706,12 @@ class Window(Adw.ApplicationWindow):
         self.restarting = True
 
         def worker():
-            results = {card: backend.bt_set_quality_mode(card)
-                       for card in cards}
+            try:
+                results = {card: backend.bt_set_quality_mode(card)
+                           for card in cards}
+            except Exception:
+                log("bluetooth restore crashed:\n" + traceback.format_exc())
+                results = {}
             GLib.idle_add(self._bt_autorestore_done, results)
 
         threading.Thread(target=worker, daemon=True).start()
@@ -696,9 +720,16 @@ class Window(Adw.ApplicationWindow):
         self.restarting = False
         if "wedged" in results.values():
             self.toast("PipeWire stopped responding - restarting it…")
+            self._set_status("restarting…")
+            self.restarting = True
 
             def worker():
-                ok, _ = backend.restart_pipewire()
+                try:
+                    ok, _ = backend.restart_pipewire()
+                except Exception:
+                    log("pipewire restart crashed:\n"
+                        + traceback.format_exc())
+                    ok = False
                 GLib.idle_add(self._bt_wedge_recovered, ok)
 
             threading.Thread(target=worker, daemon=True).start()
@@ -718,9 +749,14 @@ class Window(Adw.ApplicationWindow):
                        "(playback quality drops)…")
 
             def worker():
-                node = backend.bt_set_mic_mode(card)
-                GLib.idle_add(self._bt_mode_done, mode,
-                              node is not None)
+                try:
+                    node = backend.bt_set_mic_mode(card)
+                    ok = node is not None
+                except Exception:
+                    log("bluetooth switch crashed:\n"
+                        + traceback.format_exc())
+                    ok = False
+                GLib.idle_add(self._bt_mode_done, mode, ok)
 
             threading.Thread(target=worker, daemon=True).start()
         else:
@@ -728,7 +764,12 @@ class Window(Adw.ApplicationWindow):
             self.toast("Bluetooth: restoring high-quality mode…")
 
             def worker():
-                result = backend.bt_set_quality_mode(card)
+                try:
+                    result = backend.bt_set_quality_mode(card)
+                except Exception:
+                    log("bluetooth switch crashed:\n"
+                        + traceback.format_exc())
+                    result = ""
                 GLib.idle_add(self._bt_mode_done, mode,
                               result == "ok", result)
 
@@ -750,9 +791,15 @@ class Window(Adw.ApplicationWindow):
             # PipeWire unresponsive; recover by restarting it
             self.toast("PipeWire stopped responding - restarting it…")
             self._set_status("restarting…")
+            self.restarting = True
 
             def worker():
-                ok2, _ = backend.restart_pipewire()
+                try:
+                    ok2, _ = backend.restart_pipewire()
+                except Exception:
+                    log("pipewire restart crashed:\n"
+                        + traceback.format_exc())
+                    ok2 = False
                 GLib.idle_add(self._bt_wedge_recovered, ok2)
 
             threading.Thread(target=worker, daemon=True).start()
@@ -761,10 +808,13 @@ class Window(Adw.ApplicationWindow):
             self._refresh_bt_rows()
 
     def _bt_wedge_recovered(self, ok):
+        self.restarting = False
         self._set_status("live" if ok else "error")
         self.toast("PipeWire restarted"
                    + ("" if ok else " - still failing, check journalctl"))
         self._refresh_bt_rows()
+        if self._pending_structural:
+            self._apply_structural()
 
     # ------------------------------------------------------------ listen
 
