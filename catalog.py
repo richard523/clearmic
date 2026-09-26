@@ -53,8 +53,10 @@ STAGE_INFO = {
               integer=True),
             P("VAD Grace Period (ms)", "VAD grace", "ms", 0.0, 1000.0, 500.0,
               10.0),
+            # 100 ms costs ~100 ms of plugin-internal latency (the
+            # plugin holds output back for retroactive unmute decisions)
             P("Retroactive VAD Grace (ms)", "Retro grace", "ms", 0.0, 200.0,
-              100.0, 5.0),
+              30.0, 5.0),
             P("Dry Mix", "Dry mix (0 = full filter)", "", 0.0, 1.0, 0.0, 0.05),
         ],
     },
