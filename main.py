@@ -285,6 +285,14 @@ class Window(Adw.ApplicationWindow):
 
         for p in info["params"]:
             group.add(self._build_param_row(stage, p))
+
+        rrow = Adw.ActionRow(
+            title="Reset to recommended",
+            subtitle="restore this stage's default values")
+        btn = Gtk.Button(label="Reset", valign=Gtk.Align.CENTER)
+        btn.connect("clicked", self._on_reset_stage, stage)
+        rrow.add_suffix(btn)
+        group.add(rrow)
         return group
 
     def _build_param_row(self, stage, p):
@@ -517,6 +525,29 @@ class Window(Adw.ApplicationWindow):
 
     def _on_toggle_changed(self, sw, _pspec, stage, p):
         self._queue_edit(stage, p, 1.0 if sw.get_active() else 0.0)
+
+    def _on_reset_stage(self, _btn, stage):
+        """Reset one stage's params to the catalog recommended defaults.
+        Widget updates ride the normal value-changed -> queue -> flush
+        path, so live apply, state save and confgen all happen as usual."""
+        n = 0
+        for p in STAGE_INFO[stage]["params"]:
+            rec = self.param_rows.get((stage, p["port"]))
+            if not rec:
+                continue
+            if "switch" in rec:
+                on = p["default"] >= 0.5
+                if rec["switch"].get_active() != on:
+                    rec["switch"].set_active(on)
+                    n += 1
+            else:
+                val = to_ui(p, p["default"])
+                if abs(rec["adj"].get_value() - val) > 1e-9:
+                    rec["adj"].set_value(val)
+                    n += 1
+        title = STAGE_INFO[stage]["title"]
+        self.toast(f"{title}: reset to recommended" if n
+                   else f"{title}: already at recommended")
 
     def _queue_edit(self, stage, p, stored):
         self.pending[f"{stage}:{p['port']}"] = stored
