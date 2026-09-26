@@ -849,7 +849,33 @@ class Window(Adw.ApplicationWindow):
         else:
             section.append("(none — save one first)", "win.preset-none")
         menu.append_section("Presets", section)
+        cur = self.state.get("preset")
+        if cur and cur in files:
+            save = Gio.Menu()
+            save.append(f'Save to "{cur[:-5]}" (Ctrl+S)', "win.save")
+            menu.append_section(None, save)
         return menu
+
+    def _preset_write(self, fn):
+        """Write state to a preset file (the tracked current-preset key
+        itself is not part of the preset)."""
+        st = dict(self.state)
+        st.pop("preset", None)
+        os.makedirs(PRESETS_DIR, exist_ok=True)
+        with open(os.path.join(PRESETS_DIR, fn), "w") as f:
+            json.dump(st, f, indent=2)
+
+    def _on_preset_save_current(self, *_):
+        """Ctrl+S: save to the preset loaded last; if none is loaded,
+        fall back to the Save As dialog."""
+        fn = self.state.get("preset")
+        if not fn:
+            self._on_preset_save_as()
+            return
+        self._flush_pending()
+        self._preset_write(fn)
+        self.toast(f'Saved to preset "{fn[:-5]}"')
+        self._reload_preset_menu()
 
     def _on_preset_save_as(self, *_):
         dlg = Adw.MessageDialog(transient_for=self,
@@ -864,10 +890,9 @@ class Window(Adw.ApplicationWindow):
             if resp == "ok":
                 name = entry.get_text().strip() or "preset"
                 name = re.sub(r"[^A-Za-z0-9_-]", "-", name)
-                os.makedirs(PRESETS_DIR, exist_ok=True)
-                with open(os.path.join(PRESETS_DIR, name + ".json"),
-                          "w") as f:
-                    json.dump(self.state, f, indent=2)
+                self.state["preset"] = name + ".json"
+                save_state(self.state)
+                self._preset_write(name + ".json")
                 self._reload_preset_menu()
                 self.toast(f"Preset “{name}” saved")
 
@@ -880,10 +905,13 @@ class Window(Adw.ApplicationWindow):
     def apply_preset(self, fn):
         with open(os.path.join(PRESETS_DIR, fn)) as f:
             self.state = json.load(f)
+        # the loaded preset becomes the Ctrl+S target
+        self.state["preset"] = fn
         save_state(self.state)
         confgen.write(self.state)
         self._refresh_bt_rows()
         self._refresh_all_rows()
+        self._reload_preset_menu()
         self._apply_structural()
 
     # ------------------------------------------------------------ shutdown
@@ -925,6 +953,10 @@ class App(Adw.Application):
             a.connect("activate",
                       (lambda fn: lambda *_: self.win.apply_preset(fn))(fn))
             self.win.add_action(a)
+        a_save = Gio.SimpleAction.new("save", None)
+        a_save.connect("activate", self.win._on_preset_save_current)
+        self.win.add_action(a_save)
+        self.set_accels_for_action("win.save", ["<Control>s"])
         self.win.present()
 
     def do_shutdown(self):
