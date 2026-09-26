@@ -24,6 +24,13 @@ import confgen
 from catalog import (EXCLUSIVE, STAGES, STAGE_INFO, default_state, from_ui,
                      to_ui, ui_bounds)
 
+# autogain is parked: LSP breaks the per-node control param
+# registration inside in-place graphs (chain-wide), blinding
+# live tweaks AND attach detection. Revisit when LSP/upstream
+# fixes it. Tuned values stay in state.json/presets.
+UI_STAGES = [s for s in STAGES if s != 'autogain']
+
+
 APP_ID = "io.github.richard523.ClearMic"
 APP_TITLE = "ClearMic"
 STATE_DIR = os.path.expanduser("~/.config/clearmic")
@@ -252,7 +259,7 @@ class Window(Adw.ApplicationWindow):
 
         self.stack = Adw.ViewStack()
         switcher.set_stack(self.stack)
-        for s in STAGES:
+        for s in UI_STAGES:
             page = self._build_stage_page(s)
             self.stack.add_titled(page, s, STAGE_INFO[s]["title"])
         body.append(self.stack)
@@ -437,7 +444,7 @@ class Window(Adw.ApplicationWindow):
 
     def _refresh_all_rows(self):
         """Push state values into every widget (without emitting changes)."""
-        for stage in STAGES:
+        for stage in UI_STAGES:
             sw = self.enabled_switches[stage]
             sw.handler_block_by_func(self._on_stage_enable)
             sw.set_active(self.state["stages"][stage]["enabled"])
@@ -472,7 +479,7 @@ class Window(Adw.ApplicationWindow):
         live = backend.get_controls()
         if not live:
             return
-        for stage in STAGES:
+        for stage in UI_STAGES:
             if not self.state["stages"][stage]["enabled"]:
                 continue
             for p in STAGE_INFO[stage]["params"]:
@@ -551,9 +558,6 @@ class Window(Adw.ApplicationWindow):
         enabled = sw.get_active()
         if enabled:
             self.state["stages"][stage]["enabled"] = True
-            if stage == "autogain":
-                self.toast("Warning: LSP autogain is known to break "
-                           "live controls inside in-place DSP graphs")
             if stage in EXCLUSIVE:
                 other = "deepfilter" if stage == "rnnoise" else "rnnoise"
                 if self.state["stages"][other]["enabled"]:

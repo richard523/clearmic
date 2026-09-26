@@ -38,7 +38,10 @@ def _num(v):
 
 
 def generate(state):
-    enabled = [s for s in STAGES if state["stages"][s]["enabled"]]
+    # autogain is parked (see main.py): LSP control ports break the
+    # per-node param registration inside in-place graphs
+    enabled = [s for s in STAGES
+               if state["stages"][s]["enabled"] and s != "autogain"]
     nodes_txt = []
     for s in enabled:
         info = STAGE_INFO[s]
