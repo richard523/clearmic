@@ -25,11 +25,10 @@ import confgen
 from catalog import (EXCLUSIVE, STAGES, STAGE_INFO, default_state, from_ui,
                      to_ui, ui_bounds)
 
-# autogain is parked: LSP breaks the per-node control param
-# registration inside in-place graphs (chain-wide), blinding
-# live tweaks AND attach detection. Revisit when LSP/upstream
-# fixes it. Tuned values stay in state.json/presets.
-UI_STAGES = [s for s in STAGES if s != 'autogain']
+# autogain runs as its own filter-graph element (see confgen.py):
+# its 28 LSP control ports exceed the per-graph Props pod budget
+# of audioconvert's param enumeration, so it cannot share a graph.
+UI_STAGES = STAGES
 
 
 APP_ID = "io.github.richard523.ClearMic"
