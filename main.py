@@ -169,8 +169,6 @@ class Window(Adw.ApplicationWindow):
         self.param_rows = {}      # (stage, port) -> record
         self.restarting = False
         self._preset_map = {}
-        self._dev_names = []
-        self._dev_descs = []
         self._bt_rows = []
 
         self._build_ui()
@@ -218,24 +216,20 @@ class Window(Adw.ApplicationWindow):
         # --- signal group (device + meters)
         sig_group = Adw.PreferencesGroup(title="Signal")
         self.sig_group = sig_group
-        self.dev_combo = Adw.ComboRow(title="Input device",
-                                      subtitle="capture target of the chain")
-        self.dev_combo.connect("notify::selected", self._on_device_selected)
+        dev_row = Adw.ActionRow(
+            title="Input devices",
+            subtitle="every mic gets the chain - the system default "
+                     "is always filtered, no routing needed")
         refresh_btn = Gtk.Button(icon_name="view-refresh-symbolic",
                                  valign=Gtk.Align.CENTER)
-        refresh_btn.set_tooltip_text("Rescan devices (e.g. after connecting "
+        refresh_btn.set_tooltip_text("Rescan (e.g. after connecting "
                                      "a Bluetooth headset)")
         refresh_btn.connect("clicked", self._on_refresh_devices)
-        self.dev_combo.add_suffix(refresh_btn)
-        sig_group.add(self.dev_combo)
+        dev_row.add_suffix(refresh_btn)
+        sig_group.add(dev_row)
 
-        raw_row = Adw.ActionRow(title="Raw", subtitle="input device level")
-        self.raw_bar = LevelBar()
-        raw_row.add_suffix(self.raw_bar)
-        sig_group.add(raw_row)
-
-        out_row = Adw.ActionRow(title="Processed",
-                                subtitle="virtual source level")
+        out_row = Adw.ActionRow(title="Mic level",
+                                subtitle="default input, filtered in place")
         self.out_bar = LevelBar()
         out_row.add_suffix(self.out_bar)
         sig_group.add(out_row)
@@ -330,26 +324,21 @@ class Window(Adw.ApplicationWindow):
         stale = backend.kill_stale()
         if stale:
             log(f"killed stale audio procs from a previous run: {stale}")
-        log(f"startup: input={self.state['input']} "
-            f"stages={[s for s, v in self.state['stages'].items()
-                      if v['enabled']]} test_mode={self.test_mode}")
-        self._refresh_devices()
+        log(f"startup: stages={[s for s, v in self.state['stages'].items()
+                               if v['enabled']]} test_mode={self.test_mode}")
+        self._refresh_bt_rows()
         self._bt_autorestore_quality()
         self._refresh_all_rows()
         confgen.write(self.state)
         if self.migrated:
             self._set_banner(
-                "Migrated the legacy rnnoise filter-chain config "
-                "(20-rnnoise-source.conf renamed to .bak).",
+                "Migrated the legacy rnnoise filter-chain config.",
                 "Restart PipeWire")
             self._set_status("restart needed")
-        elif backend.filter_node_id() is None:
-            self._set_banner("Filter chain is not running.", "Start chain")
-            self._set_status("not running")
         else:
-            self._sync_from_live()
-        if not self.test_mode:
-            self._start_meters()
+            if not self.test_mode:
+                self._start_meters()   # forces the default mic to instantiate
+            self._update_chain_banner()
         if self.test_mode:
             GLib.timeout_add(1200, self._test_quit)
 
@@ -358,20 +347,35 @@ class Window(Adw.ApplicationWindow):
         self.get_application().quit()
         return False
 
+    def _update_chain_banner(self):
+        """Instantiation is lazy: a node exposes the graph once a stream
+        opens on it. Retry briefly before declaring the chain down."""
+        if backend.chain_node_ids():
+            self._set_banner(None)
+            self._sync_from_live()
+            return
+        self._set_banner("Filter chain is not attached.", "Start chain")
+        self._set_status("not running")
+        GLib.timeout_add(1000, self._update_chain_banner_retry)
+
+    def _update_chain_banner_retry(self):
+        if self.restarting or backend.chain_node_ids():
+            if backend.chain_node_ids():
+                self._set_banner(None)
+                self._sync_from_live()
+            return GLib.SOURCE_REMOVE
+        self._update_chain_banner()
+        return GLib.SOURCE_REMOVE
+
     # ------------------------------------------------------------ meters
 
     def _start_meters(self):
         self._stop_meters()
-        raw_target = self.state["input"]
-        if raw_target == "auto" or not raw_target:
-            # follow mode: meter the device the chain is capturing from
-            raw_target = backend.filter_capture_device() \
-                or backend.FILTER_OUTPUT
-        self.meters["raw"] = backend.Meter(raw_target)
-        self.meters["out"] = backend.Meter(backend.FILTER_OUTPUT)
-        self.raw_bar.meter = self.meters["raw"]
-        self.out_bar.meter = self.meters["out"]
-        for m in self.meters.values():
+        target = backend.default_source()
+        if target:
+            m = backend.Meter(target)
+            self.meters["out"] = m
+            self.out_bar.meter = m
             m.start()
         self._meter_tick = GLib.timeout_add(33, self._on_meter_tick)
 
@@ -384,39 +388,13 @@ class Window(Adw.ApplicationWindow):
         self.meters = {}
 
     def _on_meter_tick(self):
-        self.raw_bar.queue_draw()
         self.out_bar.queue_draw()
         return GLib.SOURCE_CONTINUE
 
     # ------------------------------------------------------------ refresh
 
-    def _refresh_devices(self):
-        devs = backend.input_devices()
-        desc_of = dict(devs)
-        store = Gtk.StringList()
-        self._dev_names = ["auto"]
-        self._dev_descs = ["Follow default input device"]
-        store.append("Follow default input device")
-        sel = 0
-
-        def _mac(s):
-            return s.replace(":", "").replace("_", "").lower()
-
-        # bluetooth headsets cannot be part of this list: their mic
-        # nodes register too late to be pinned. The chain follows the
-        # default device; headset mode is controlled by dedicated
-        # toggle buttons built below.
-        for name, desc in devs:
-            if name.startswith("bluez_input."):
-                continue
-            label = desc or name
-            store.append(label)
-            self._dev_names.append(name)
-            self._dev_descs.append(label)
-            if name == self.state.get("input"):
-                sel = len(self._dev_names) - 1
-
-        # rebuild the bluetooth mode rows (state, not selection)
+    def _refresh_bt_rows(self):
+        """Rebuild the bluetooth mode rows (state, not selection)."""
         for row in self._bt_rows:
             self.sig_group.remove(row)
         self._bt_rows = []
@@ -441,44 +419,6 @@ class Window(Adw.ApplicationWindow):
             row.add_suffix(box)
             self.sig_group.add(row)
             self._bt_rows.append(row)
-
-        self.dev_combo.handler_block_by_func(self._on_device_selected)
-        self.dev_combo.set_model(store)
-        cur = self.state.get("input")
-        if cur and cur.startswith("bluez_input."):
-            # legacy pin to a bluetooth mic: these cannot be pinned;
-            # migrate to follow mode
-            self.state["input"] = "auto"
-            self.state["source_desc"] = "Default input device"
-            save_state(self.state)
-            confgen.write(self.state)
-            log(f"migrated bluetooth pin '{cur}' to follow mode")
-            cur = "auto"
-        if cur and cur != "auto" and cur not in self._dev_names:
-                # pinned device is gone: adopt the device the chain is
-                # actually capturing from, else fall back to "auto"
-                live = backend.filter_capture_device()
-                if live in self._dev_names:
-                    pick = live
-                else:
-                    pick = "auto"
-                sel = 0 if pick == "auto" else self._dev_names.index(pick)
-                self.state["input"] = pick
-                self.state["source_desc"] = self._dev_descs[sel]
-                save_state(self.state)
-                confgen.write(self.state)
-                log(f"input device '{cur}' is not present; "
-                    f"using '{pick}' instead")
-        self.dev_combo.set_selected(sel)
-        self.dev_combo.handler_unblock_by_func(self._on_device_selected)
-        # subtitle: in follow mode show what is being filtered right now
-        if self.state.get("input") in ("", "auto"):
-            live = backend.filter_capture_device()
-            txt = desc_of.get(live, live) if live else "no device"
-            self.dev_combo.set_subtitle(
-                f"following default device - now: {txt}")
-        else:
-            self.dev_combo.set_subtitle("capture target of the chain")
 
     # -------------------------------------------------- bluetooth modes
 
@@ -546,8 +486,8 @@ class Window(Adw.ApplicationWindow):
         save_state(self.state)
         confgen.write(self.state)
         self._refresh_all_rows()
-        nid = backend.filter_node_id()
-        self._set_status(f"live · node {nid}")
+        ids = backend.chain_node_ids()
+        self._set_status(f"live · {len(ids)} mic(s) attached")
 
     # ------------------------------------------------------------ param edits
 
@@ -593,7 +533,7 @@ class Window(Adw.ApplicationWindow):
                     toggles.add(key)
             if self.state["stages"][stage]["enabled"]:
                 applicable[key] = pairs[key]
-        if applicable and backend.filter_node_id() is not None:
+        if applicable and backend.chain_node_ids():
             try:
                 backend.set_controls(applicable, toggles)
             except RuntimeError as e:
@@ -611,6 +551,9 @@ class Window(Adw.ApplicationWindow):
         enabled = sw.get_active()
         if enabled:
             self.state["stages"][stage]["enabled"] = True
+            if stage == "autogain":
+                self.toast("Warning: LSP autogain is known to break "
+                           "live controls inside in-place DSP graphs")
             if stage in EXCLUSIVE:
                 other = "deepfilter" if stage == "rnnoise" else "rnnoise"
                 if self.state["stages"][other]["enabled"]:
@@ -686,25 +629,9 @@ class Window(Adw.ApplicationWindow):
     def _on_refresh_devices(self, *_):
         if self.restarting:
             return
-        self._refresh_devices()
+        self._refresh_bt_rows()
         self._bt_autorestore_quality()
-        self.toast("Device list refreshed")
-
-    def _on_device_selected(self, *_):
-        if not self._dev_names or self.restarting:
-            return
-        idx = self.dev_combo.get_selected()
-        if idx >= len(self._dev_names):
-            return
-        name = self._dev_names[idx]
-        if name == self.state.get("input"):
-            return
-        self.state["input"] = name
-        self.state["source_desc"] = ("Default input device" if name == "auto"
-                                     else self._dev_descs[idx])
-        save_state(self.state)
-        confgen.write(self.state)
-        self._apply_structural()
+        self.toast("Devices refreshed")
 
     # -------------------------------------------------- bluetooth modes
 
@@ -716,11 +643,8 @@ class Window(Adw.ApplicationWindow):
         it cannot fight an explicit user choice."""
         if self.restarting:
             return
-        live = backend.filter_capture_device()
-        if not live or live.startswith("bluez_input."):
-            return  # unlinked (unknown state) or the headset mic is in use
-        if (self.state.get("input") or "").startswith("bluez_input."):
-            return  # user explicitly pinned the headset mic
+        if backend.bt_mic_in_use():
+            return  # a headset mic is being captured right now
         cards = [c["card"] for c in backend.bt_cards() if c["mic"]]
         if not cards:
             return
@@ -747,18 +671,11 @@ class Window(Adw.ApplicationWindow):
         if "ok" in results:
             self.toast("Bluetooth: restored high-quality mode "
                        "(mic not in use)")
-        self._refresh_devices()
+        self._refresh_bt_rows()
 
     def _bt_apply(self, card, mode):
         if self.restarting:
             return
-        # a pinned input would keep the chain off the headset mic:
-        # follow mode is required for bluetooth to work at all
-        if self.state.get("input") not in ("", "auto"):
-            self.state["input"] = "auto"
-            self.state["source_desc"] = "Default input device"
-            save_state(self.state)
-            confgen.write(self.state)
         self.restarting = True
         if mode == "mic":
             self._set_status("switching headset to mic mode…")
@@ -791,7 +708,7 @@ class Window(Adw.ApplicationWindow):
                            "while it is the default input")
             else:
                 self.toast("High-quality playback restored (no mic)")
-            self._refresh_devices()
+            self._refresh_bt_rows()
             return
         if detail == "wedged":
             # known upstream bug: HFP transport teardown can leave
@@ -806,20 +723,20 @@ class Window(Adw.ApplicationWindow):
             threading.Thread(target=worker, daemon=True).start()
         else:
             self.toast("Could not switch the headset profile")
-            self._refresh_devices()
+            self._refresh_bt_rows()
 
     def _bt_wedge_recovered(self, ok):
         self._set_status("live" if ok else "error")
         self.toast("PipeWire restarted"
                    + ("" if ok else " - still failing, check journalctl"))
-        self._refresh_devices()
+        self._refresh_bt_rows()
 
     # ------------------------------------------------------------ listen
 
     def _on_listen(self, btn):
         if btn.get_active():
-            if backend.filter_node_id() is None:
-                self.toast("Filter chain is not running")
+            if not backend.chain_node_ids():
+                self.toast("Filter chain is not attached")
                 self._stop_listen()
                 return
             dlg = Adw.MessageDialog(
@@ -930,7 +847,7 @@ class Window(Adw.ApplicationWindow):
             self.state = json.load(f)
         save_state(self.state)
         confgen.write(self.state)
-        self._refresh_devices()
+        self._refresh_bt_rows()
         self._refresh_all_rows()
         self._apply_structural()
 

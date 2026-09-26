@@ -13,12 +13,22 @@ ViewSwitcher tabs, PreferencesGroup rows, toasts, and a proper About dialog.
 
 ## The chain
 
+WirePlumber's internal filter graphs attach the chain *inside* every
+capture device node (ALSA and Bluetooth HFP mics alike):
+
 ```
-input device → gate → RNNoise / DeepFilterNet → de-esser → SC4 compressor
-            → autogain → limiter → virtual source ("ClearMic")
+mic node [ gate → RNNoise / DeepFilterNet → de-esser → SC4 compressor
+        → autogain → limiter ] → apps
 ```
 
-Any app that records from the virtual source gets the processed signal.
+Clients keep seeing the real device node, already processed. There is
+no virtual source, no device pinning, no per-app routing: whichever mic
+the system default selects is filtered, and mono headsets work
+(audioconvert adapts channels around the graph).
+
+Known limitation: LSP autogain currently breaks the per-node control
+param registration when placed in the graph, so live slider tweaks
+stop working chain-wide while it is enabled.
 
 ## Features
 
@@ -28,7 +38,7 @@ Any app that records from the virtual source gets the processed signal.
   are mutually exclusive, at least one stage stays on.
 - **Live apply** — slider tweaks go straight to the running graph
   (`pw-cli set-param`), debounced 300 ms.
-- **Level meters** — raw input and processed output, drawn at 30 fps.
+- **Level meter** — the default input (filtered in place), at 30 fps.
 - **Live test** — route the processed mic to your speakers in real time
   (with a feedback warning; use headphones).
 - **Presets** — save and load full chain snapshots.

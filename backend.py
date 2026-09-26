@@ -1,5 +1,10 @@
 """PipeWire interop: live control values, runtime set-param, meters, monitor,
-restart. All via the pw-* CLI tools (no native bindings needed)."""
+restart. All via the pw-* CLI tools (no native bindings needed).
+
+The DSP chain is attached inside capture device nodes by WirePlumber
+(internal filter graphs); there is no virtual source node anymore.
+"""
+from catalog import STAGES
 import array
 import ctypes
 import json
@@ -10,9 +15,6 @@ import signal
 import subprocess
 import threading
 import time
-
-FILTER_INPUT = "effect_input.rnnoise"    # graph-controls live on this node
-FILTER_OUTPUT = "effect_output.rnnoise"  # virtual source
 
 _PR_SET_PDEATHSIG = 1  # Linux prctl option
 
@@ -30,19 +32,23 @@ def _die_with_parent():
 
 def kill_stale():
     """Kill orphaned pw-loopback/pw-record processes from a previous,
-    abnormally-exited instance that still target our nodes. Called at
-    startup, before this instance spawns its own."""
-    patterns = [f"pw-loopback -C {FILTER_OUTPUT}",
-                f"pw-record .*--target {FILTER_OUTPUT}"]
+    abnormally-exited instance (their parent is gone, ppid == 1).
+    Called at startup, before this instance spawns its own."""
     killed = []
-    for pat in patterns:
-        r = subprocess.run(["pgrep", "-f", pat],
-                           capture_output=True, text=True)
-        for pid_s in r.stdout.split():
+    r = subprocess.run(["pgrep", "-f", "pw-record|pw-loopback"],
+                       capture_output=True, text=True)
+    for pid_s in r.stdout.split():
+        try:
+            pid = int(pid_s)
+            with open(f"/proc/{pid}/stat") as f:
+                ppid = int(f.read().split()[3])
+        except (OSError, ValueError, IndexError):
+            continue
+        if ppid == 1:
             try:
-                os.kill(int(pid_s), signal.SIGTERM)
-                killed.append(int(pid_s))
-            except (ValueError, ProcessLookupError, PermissionError):
+                os.kill(pid, signal.SIGTERM)
+                killed.append(pid)
+            except (ProcessLookupError, PermissionError):
                 pass
     return killed
 
@@ -67,35 +73,74 @@ def nodes():
     return out
 
 
-def filter_node_id():
-    return nodes().get(FILTER_INPUT)
-
-
-def filter_capture_device():
-    """node.name of the source currently feeding the filter chain, or
-    None (chain absent, or not linked to a capture device)."""
+def _pw_dump():
     r = run("pw-dump")
     try:
-        d = json.loads(r.stdout)
+        return json.loads(r.stdout)
     except json.JSONDecodeError:
+        return []
+
+
+def default_source():
+    """Effective default source node name, or None."""
+    r = run("pactl", "get-default-source")
+    if r.returncode != 0:
         return None
-    names = {}
-    fid = None
-    for o in d:
+    return r.stdout.strip() or None
+
+
+def chain_node_ids():
+    """Node ids (str) of capture devices where the ClearMic graph is
+    instantiated. A node exposes the stage control params once a
+    stream opens on it; suspended nodes get the graph on first use."""
+    prefixes = tuple(f"{s}:" for s in STAGES)
+    ids = []
+    for o in _pw_dump():
         props = o.get("info", {}).get("props", {}) or {}
+        name = props.get("node.name", "")
+        if not (name.startswith("alsa_input.")
+                or name.startswith("bluez_input.")):
+            continue
+        if props.get("media.class") != "Audio/Source":
+            continue
+        params = o.get("info", {}).get("params", {}) or {}
+        for p in params.get("Props", []):
+            v = p.get("params", [])
+            if any(isinstance(k, str) and k.startswith(prefixes) for k in v):
+                ids.append(str(o["id"]))
+                break
+    return ids
+
+
+def capture_nodes_present():
+    """True once ALSA/Bluetooth capture device nodes exist again (the
+    DSP rules attach to them as they appear)."""
+    for o in _pw_dump():
+        props = o.get("info", {}).get("props", {}) or {}
+        name = props.get("node.name", "")
+        if ((name.startswith("alsa_input.")
+                or name.startswith("bluez_input."))
+                and props.get("media.class") == "Audio/Source"):
+            return True
+    return False
+
+
+def bt_mic_in_use():
+    """True if any stream is currently capturing from a Bluetooth mic."""
+    d = _pw_dump()
+    names = {}
+    for o in d:
         if o.get("type", "").endswith("Node"):
-            names[o["id"]] = props.get("node.name")
-            if props.get("node.name") == FILTER_INPUT:
-                fid = o["id"]
-    if fid is None:
-        return None
+            names[o["id"]] = (o.get("info", {}).get("props", {})
+                              or {}).get("node.name", "")
     for o in d:
         if o.get("type") != "PipeWire:Interface:Link":
             continue
         props = o.get("info", {}).get("props", {}) or {}
-        if props.get("link.input.node") == fid:
-            return names.get(props.get("link.output.node"))
-    return None
+        if names.get(props.get("link.output.node"), "") \
+                .startswith("bluez_input."):
+            return True
+    return False
 
 
 # ------------------------------------------------------- bluetooth keepalive
@@ -148,9 +193,10 @@ def bt_reconnect(macs):
 
 def get_controls():
     """Live control values: {'<stage>:<port>': value} for the running chain."""
-    nid = filter_node_id()
-    if nid is None:
+    ids = chain_node_ids()
+    if not ids:
         return {}
+    nid = ids[0]
     r = run("pw-dump", nid)
     try:
         d = json.loads(r.stdout)
@@ -176,9 +222,11 @@ def _fmt_num(v):
 
 
 def set_controls(pairs, toggle_keys=frozenset()):
-    """Apply {'<stage>:<port>': value} live via a single pw-cli set-param."""
-    nid = filter_node_id()
-    if nid is None:
+    """Apply {'<stage>:<port>': value} live to every instantiated chain
+    node via pw-cli set-param (suspended nodes pick the values up from
+    the generated fragment when they first run)."""
+    ids = chain_node_ids()
+    if not ids:
         raise RuntimeError("filter chain is not running")
     items = []
     for k, v in pairs.items():
@@ -188,9 +236,11 @@ def set_controls(pairs, toggle_keys=frozenset()):
         else:
             items.append(_fmt_num(v))
     arg = "{ params: [ " + ", ".join(items) + " ] }"
-    r = run("pw-cli", "set-param", nid, "Props", arg)
-    if r.returncode != 0:
-        raise RuntimeError(f"pw-cli set-param failed: {r.stderr.strip()}")
+    for nid in ids:
+        r = run("pw-cli", "set-param", nid, "Props", arg)
+        if r.returncode != 0:
+            raise RuntimeError(
+                f"pw-cli set-param failed on node {nid}: {r.stderr.strip()}")
 
 
 def input_devices():
@@ -357,8 +407,8 @@ def restart_pipewire(timeout=25.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         time.sleep(0.25)
-        if filter_node_id() is not None:
-            time.sleep(0.5)   # let links settle
+        if capture_nodes_present():
+            time.sleep(0.5)   # let nodes settle
             restored = bt_reconnect(bt_before)
             return True, restored
     restored = bt_reconnect(bt_before)   # chain still down, restore BT anyway
@@ -431,8 +481,11 @@ class Monitor:
     def start(self):
         if self.active:
             return
+        target = default_source()
+        if not target:
+            return
         self.proc = subprocess.Popen(
-            ["pw-loopback", "-C", FILTER_OUTPUT],
+            ["pw-loopback", "-C", target],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             preexec_fn=_die_with_parent)
 
