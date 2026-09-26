@@ -12,6 +12,7 @@ import os
 import re
 import sys
 import threading
+import traceback
 import time
 
 import gi
@@ -902,7 +903,24 @@ class App(Adw.Application):
         Adw.Application.do_shutdown(self)
 
 
+def _install_excepthooks():
+    """Desktop launches discard stderr, so unhandled exceptions vanish
+    without a trace. Keep the evidence in the app log."""
+    def log_exc(kind, tp, val, tb):
+        try:
+            log(f"unhandled {kind} exception:\n"
+                + "".join(traceback.format_exception(tp, val, tb)).rstrip())
+        except Exception:
+            pass
+        sys.__excepthook__(tp, val, tb)
+
+    sys.excepthook = lambda tp, val, tb: log_exc("main", tp, val, tb)
+    threading.excepthook = lambda a: log_exc(
+        "thread", a.exc_type, a.exc_value, a.exc_traceback)
+
+
 def main():
+    _install_excepthooks()
     test_mode = "--selftest" in sys.argv
     app = App(test_mode)
     app.run(None)
