@@ -175,7 +175,7 @@ class Window(Adw.ApplicationWindow):
         self.enabled_switches = {}
         self.param_rows = {}      # (stage, port) -> record
         self.restarting = False
-        self._preset_map = {}
+        self._preset_actions = []
         self._bt_rows = []
 
         self._build_ui()
@@ -836,25 +836,71 @@ class Window(Adw.ApplicationWindow):
                       if f.endswith(".json"))
 
     def _build_preset_menu(self):
+        # Actions are (re)registered here, not once at startup: this
+        # menu is rebuilt after every save/apply/delete, and GTK grays
+        # out entries whose action does not exist.
+        for action in self._preset_actions:
+            self.remove_action(action)
+        self._preset_actions = []
         menu = Gio.Menu()
         section = Gio.Menu()
+        del_section = Gio.Menu()
         files = self._preset_files()
+        for i, fn in enumerate(files):
+            name = fn[:-5]
+            a_load = self._add_preset_action(
+                f"preset-{i}",
+                lambda _a, _p, fn=fn: self.apply_preset(fn))
+            section.append(name, "win." + a_load)
+            a_del = self._add_preset_action(
+                f"preset-del-{i}",
+                lambda _a, _p, fn=fn: self._on_preset_delete(fn))
+            del_section.append(name, "win." + a_del)
         if files:
-            for fn in files:
-                name = fn[:-5]
-                action = "preset-" + re.sub(r"[^a-z0-9-]", "-",
-                                            name.lower())
-                self._preset_map[action] = fn
-                section.append(name, f"win.{action}")
+            menu.append_section("Presets", section)
+            menu.append_section("Delete…", del_section)
         else:
             section.append("(none — save one first)", "win.preset-none")
-        menu.append_section("Presets", section)
+            menu.append_section("Presets", section)
         cur = self.state.get("preset")
         if cur and cur in files:
             save = Gio.Menu()
             save.append(f'Save to "{cur[:-5]}" (Ctrl+S)', "win.save")
             menu.append_section(None, save)
         return menu
+
+    def _add_preset_action(self, name, cb):
+        a = Gio.SimpleAction.new(name, None)
+        a.connect("activate", cb)
+        self.add_action(a)
+        self._preset_actions.append(name)
+        return name
+
+    def _on_preset_delete(self, fn):
+        name = fn[:-5]
+        dlg = Adw.MessageDialog(
+            transient_for=self, heading=f'Delete preset "{name}"?',
+            body="This cannot be undone.")
+        dlg.add_response("cancel", "Cancel")
+        dlg.add_response("delete", "Delete")
+        dlg.set_response_appearance("delete",
+                                    Adw.ResponseAppearance.DESTRUCTIVE)
+
+        def on_resp(d, resp):
+            if resp != "delete":
+                return
+            try:
+                os.remove(os.path.join(PRESETS_DIR, fn))
+            except FileNotFoundError:
+                pass
+            if self.state.get("preset") == fn:
+                del self.state["preset"]
+                save_state(self.state)
+            self._reload_preset_menu()
+            self.toast(f'Preset "{name}" deleted')
+
+        dlg.connect("response", on_resp)
+        dlg.present()
 
     def _preset_write(self, fn):
         """Write state to a preset file (the tracked current-preset key
@@ -948,11 +994,8 @@ class App(Adw.Application):
         a_about = Gio.SimpleAction.new("about", None)
         a_about.connect("activate", self.win._on_about)
         self.win.add_action(a_about)
-        for action, fn in self.win._preset_map.items():
-            a = Gio.SimpleAction.new(action, None)
-            a.connect("activate",
-                      (lambda fn: lambda *_: self.win.apply_preset(fn))(fn))
-            self.win.add_action(a)
+        # preset actions are registered by _build_preset_menu, which
+        # re-registers them on every menu rebuild
         a_save = Gio.SimpleAction.new("save", None)
         a_save.connect("activate", self.win._on_preset_save_current)
         self.win.add_action(a_save)
