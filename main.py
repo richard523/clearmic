@@ -894,7 +894,6 @@ class Window(Adw.ApplicationWindow):
         self._preset_actions = []
         menu = Gio.Menu()
         section = Gio.Menu()
-        del_section = Gio.Menu()
         files = self._preset_files()
         for i, fn in enumerate(files):
             name = fn[:-5]
@@ -902,21 +901,15 @@ class Window(Adw.ApplicationWindow):
                 f"preset-{i}",
                 lambda _a, _p, fn=fn: self.apply_preset(fn))
             section.append(name, "win." + a_load)
-            a_del = self._add_preset_action(
-                f"preset-del-{i}",
-                lambda _a, _p, fn=fn: self._on_preset_delete(fn))
-            del_section.append(name, "win." + a_del)
-        if files:
-            menu.append_section("Presets", section)
-            menu.append_section("Delete…", del_section)
-        else:
+        if not files:
             section.append("(none — save one first)", "win.preset-none")
-            menu.append_section("Presets", section)
+        menu.append_section("Presets", section)
+        tools = Gio.Menu()
         cur = self.state.get("preset")
         if cur and cur in files:
-            save = Gio.Menu()
-            save.append(f'Save to "{cur[:-5]}" (Ctrl+S)', "win.save")
-            menu.append_section(None, save)
+            tools.append(f'Save to "{cur[:-5]}" (Ctrl+S)', "win.save")
+        tools.append("Delete preset…", "win.preset-delete")
+        menu.append_section(None, tools)
         return menu
 
     def _add_preset_action(self, name, cb):
@@ -926,30 +919,64 @@ class Window(Adw.ApplicationWindow):
         self._preset_actions.append(name)
         return name
 
-    def _on_preset_delete(self, fn):
-        name = fn[:-5]
-        dlg = Adw.MessageDialog(
-            transient_for=self, heading=f'Delete preset "{name}"?',
-            body="This cannot be undone.")
-        dlg.add_response("cancel", "Cancel")
-        dlg.add_response("delete", "Delete")
-        dlg.set_response_appearance("delete",
-                                    Adw.ResponseAppearance.DESTRUCTIVE)
+    def _on_preset_delete(self, *_):
+        """Preset picker for deletion: one list with a trash button per
+        row, confirmation before the file is removed. Stays open so
+        several presets can be deleted in one visit."""
+        dlg = Adw.MessageDialog(transient_for=self,
+                                heading="Delete preset")
+        listbox = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+        listbox.add_css_class("boxed-list")
+        dlg.set_extra_child(listbox)
+        dlg.add_response("close", "Done")
 
-        def on_resp(d, resp):
-            if resp != "delete":
-                return
-            try:
-                os.remove(os.path.join(PRESETS_DIR, fn))
-            except FileNotFoundError:
-                pass
-            if self.state.get("preset") == fn:
-                del self.state["preset"]
-                save_state(self.state)
-            self._reload_preset_menu()
-            self.toast(f'Preset "{name}" deleted')
+        def confirm(_btn, fn, name):
+            c = Adw.MessageDialog(
+                transient_for=self, heading=f'Delete preset "{name}"?',
+                body="This cannot be undone.")
+            c.add_response("cancel", "Cancel")
+            c.add_response("delete", "Delete")
+            c.set_response_appearance("delete",
+                                      Adw.ResponseAppearance.DESTRUCTIVE)
 
-        dlg.connect("response", on_resp)
+            def on_resp(_d, resp):
+                if resp != "delete":
+                    return
+                try:
+                    os.remove(os.path.join(PRESETS_DIR, fn))
+                except FileNotFoundError:
+                    pass
+                if self.state.get("preset") == fn:
+                    del self.state["preset"]
+                    save_state(self.state)
+                self._reload_preset_menu()
+                rebuild()
+                self.toast(f'Preset "{name}" deleted')
+
+            c.connect("response", on_resp)
+            c.present()
+
+        def rebuild():
+            child = listbox.get_first_child()
+            while child is not None:
+                listbox.remove(child)
+                child = listbox.get_first_child()
+            files = self._preset_files()
+            for fn in files:
+                name = fn[:-5]
+                row = Adw.ActionRow(title=name)
+                btn = Gtk.Button(icon_name="user-trash-symbolic",
+                                 valign=Gtk.Align.CENTER)
+                btn.add_css_class("destructive-action")
+                btn.set_tooltip_text(f'Delete "{name}"')
+                btn.connect("clicked", confirm, fn, name)
+                row.add_suffix(btn)
+                listbox.append(row)
+            if not files:
+                listbox.append(Adw.ActionRow(
+                    title="(none — save one first)"))
+
+        rebuild()
         dlg.present()
 
     def _preset_write(self, fn):
@@ -1050,6 +1077,9 @@ class App(Adw.Application):
         a_save.connect("activate", self.win._on_preset_save_current)
         self.win.add_action(a_save)
         self.set_accels_for_action("win.save", ["<Control>s"])
+        a_del = Gio.SimpleAction.new("preset-delete", None)
+        a_del.connect("activate", self.win._on_preset_delete)
+        self.win.add_action(a_del)
         self.win.present()
 
     def do_shutdown(self):
