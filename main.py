@@ -22,8 +22,8 @@ from gi.repository import Adw, Gio, GLib, Gtk
 
 import backend
 import confgen
-from catalog import (EXCLUSIVE, STAGES, STAGE_INFO, default_state, from_ui,
-                     to_ui, ui_bounds)
+from catalog import (BYPASS, EXCLUSIVE, STAGES, STAGE_INFO, default_state,
+                     from_ui, to_ui, ui_bounds)
 
 # autogain runs as its own filter-graph element (see confgen.py):
 # its 28 LSP control ports exceed the per-graph Props pod budget
@@ -277,7 +277,7 @@ class Window(Adw.ApplicationWindow):
 
         erow = Adw.ActionRow(
             title="Enabled",
-            subtitle="rebuilding the chain restarts PipeWire (~3 s)")
+            subtitle="applied live - open apps keep working")
         sw = Gtk.Switch(valign=Gtk.Align.CENTER)
         sw.connect("notify::active", self._on_stage_enable, stage)
         self.enabled_switches[stage] = sw
@@ -345,10 +345,17 @@ class Window(Adw.ApplicationWindow):
         self._refresh_bt_rows()
         self._bt_autorestore_quality()
         self._refresh_all_rows()
+        topology = confgen.conf_stage_names()
         confgen.write(self.state)
         if self.migrated:
             self._set_banner(
                 "Migrated the legacy rnnoise filter-chain config.",
+                "Restart PipeWire")
+            self._set_status("restart needed")
+        elif sorted(topology) != sorted(STAGES):
+            self._set_banner(
+                "Chain layout updated - restart PipeWire once to load "
+                "it (open apps will need to reopen their mic).",
                 "Restart PipeWire")
             self._set_status("restart needed")
         else:
@@ -586,12 +593,14 @@ class Window(Adw.ApplicationWindow):
 
     def _on_stage_enable(self, sw, _pspec, stage):
         enabled = sw.get_active()
+        flipped = []
         if enabled:
             self.state["stages"][stage]["enabled"] = True
             if stage in EXCLUSIVE:
                 other = "deepfilter" if stage == "rnnoise" else "rnnoise"
                 if self.state["stages"][other]["enabled"]:
                     self.state["stages"][other]["enabled"] = False
+                    flipped = [other]
                     self.toast(f"Disabled {STAGE_INFO[other]['title']} "
                                 f"(only one noise suppressor)")
         else:
@@ -605,13 +614,36 @@ class Window(Adw.ApplicationWindow):
         save_state(self.state)
         confgen.write(self.state)
         self._refresh_all_rows()
-        if self.restarting:
-            # The conf is already written, so the running restart will
-            # most likely pick it up; queue a rebuild anyway to make
-            # sure, instead of silently dropping the change.
-            self._pending_structural = True
-            return
-        self._apply_structural()
+        # on/off is a live param change (user values / neutral
+        # bypass), NEVER a restart: a PipeWire restart destroys every
+        # open app's capture stream and most apps never reopen it
+        self._push_stage_live(stage, *flipped)
+        self.toast(f"{STAGE_INFO[stage]['title']} "
+                   f"{'on' if enabled else 'off'} - applied live")
+
+    def _push_stage_live(self, *stages):
+        """Push each stage's params to the running chain: user values
+        when enabled, neutral bypass values (catalog.BYPASS) when not."""
+        pairs, toggles = {}, set()
+        for s in stages:
+            if self.state["stages"][s]["enabled"]:
+                for p in STAGE_INFO[s]["params"]:
+                    port = p["port"]
+                    val = self.state["stages"][s]["params"].get(
+                        port, p["default"])
+                    pairs[f"{s}:{port}"] = val
+                    if p["toggle"]:
+                        toggles.add(f"{s}:{port}")
+            else:
+                for port, val in BYPASS[s].items():
+                    pairs[f"{s}:{port}"] = val
+        if not pairs or not backend.chain_node_ids():
+            return  # conf seeds the same values for suspended devices
+        try:
+            backend.set_controls(pairs, toggles)
+        except RuntimeError as e:
+            log(f"set_controls failed: {e}")
+            self.toast(f"Could not apply: {e}")
 
     def _apply_structural(self):
         log("structural change: restarting PipeWire")
@@ -1035,6 +1067,9 @@ class Window(Adw.ApplicationWindow):
         self._refresh_bt_rows()
         self._refresh_all_rows()
         self._reload_preset_menu()
+        # static topology: everything applies live, no restart
+        self._push_stage_live(*STAGES)
+        self.toast(f'Preset "{fn[:-5]}" applied (live)')
         self._apply_structural()
 
     # ------------------------------------------------------------ shutdown

@@ -14,6 +14,31 @@ STAGES = ["gate", "rnnoise", "deepfilter", "deesser", "sc4", "autogain", "limite
 EXCLUSIVE = {"rnnoise", "deepfilter"}
 DEFAULT_ENABLED = {"rnnoise", "sc4", "autogain"}
 
+# Runtime bypass: a disabled stage stays in the static graph (loaded
+# once) but is neutralized live via set-param, so on/off never restarts
+# PipeWire — a restart destroys every open app's capture stream and
+# most apps never reopen it.
+BYPASS = {
+    # gate never closes: threshold at -90 dB, reduction capped at -72 dB
+    "gate": {"Curve threshold (G)": 1.5849e-05, "Reduction (G)": 0.00025119},
+    # 100% dry signal = no suppression
+    "rnnoise": {"Dry Mix": 1.0},
+    # attenuation limited to 0 dB = passthrough (the model still runs)
+    "deepfilter": {"Attenuation Limit (dB)": 0.0},
+    # threshold -60 dB and ratio 1:1 = never engages
+    "deesser": {"Threshold (G)": 0.001, "Ratio": 1.0},
+    # ratio 1:1 with no makeup = bit-transparent
+    "sc4": {"Threshold level (dB)": 0.0, "Ratio (1:n)": 1.0,
+            "Makeup gain (dB)": 0.0},
+    # target 0 LUFS is unreachable for mic-level input and boosting is
+    # capped at 0 dB, so the applied gain stays 1.0
+    "autogain": {"Desired loudness level (LUFS)": 0.0,
+                 "Enable maximum amplification gain limitation": 1.0,
+                 "The maximum amplification gain (dB)": 0.0},
+    # threshold 0 dBFS = never limits
+    "limiter": {"Threshold (G)": 1.0, "Output gain (G)": 1.0},
+}
+
 STAGE_INFO = {
     "gate": {
         "title": "Gate", "subtitle": "LSP noise gate",
