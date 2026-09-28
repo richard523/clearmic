@@ -352,7 +352,7 @@ class Window(Adw.ApplicationWindow):
                 "Migrated the legacy rnnoise filter-chain config.",
                 "Restart PipeWire")
             self._set_status("restart needed")
-        elif sorted(topology) != sorted(STAGES):
+        elif topology != confgen.GRAPH_ORDER:
             self._set_banner(
                 "Chain layout updated - restart PipeWire once to load "
                 "it (open apps will need to reopen their mic).",
